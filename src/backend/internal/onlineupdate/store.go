@@ -10,16 +10,21 @@ import (
 
 // Status is the secret-free public and durable operation snapshot.
 type Status struct {
-	State          string   `json:"state"`
-	CurrentVersion string   `json:"currentVersion"`
-	Latest         *Release `json:"latest"`
-	Phase          string   `json:"phase"`
-	Message        string   `json:"message"`
-	OperationID    string   `json:"operationId"`
-	UpdatedAt      string   `json:"updatedAt"`
-	CanApply       bool     `json:"canApply"`
-	CanRollback    bool     `json:"canRollback"`
-	Enabled        bool     `json:"enabled"`
+	State           string   `json:"state"`
+	CurrentVersion  string   `json:"currentVersion"`
+	Latest          *Release `json:"latest"`
+	Phase           string   `json:"phase"`
+	Message         string   `json:"message"`
+	OperationID     string   `json:"operationId"`
+	UpdatedAt       string   `json:"updatedAt"`
+	CanApply        bool     `json:"canApply"`
+	CanRollback     bool     `json:"canRollback"`
+	Enabled         bool     `json:"enabled"`
+	StagedUpdates   bool     `json:"stagedUpdates"`
+	Prepared        *Release `json:"prepared"`
+	DownloadPercent *float64 `json:"downloadPercent"`
+	DownloadedBytes int64    `json:"downloadedBytes,omitempty"`
+	TotalBytes      int64    `json:"totalBytes,omitempty"`
 }
 
 // Record includes only non-secret internal rollback metadata alongside public status.
@@ -27,6 +32,8 @@ type Record struct {
 	Source          Source `json:"source"`
 	Status          Status `json:"status"`
 	PreviousVersion string `json:"previousVersion"`
+	PreparedSource  Source `json:"preparedSource,omitempty"`
+	DownloadOnly    bool   `json:"downloadOnly,omitempty"`
 }
 
 // Store persists snapshots before any external mutation.

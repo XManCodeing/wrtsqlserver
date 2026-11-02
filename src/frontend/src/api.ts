@@ -116,6 +116,12 @@ export const api = {
   /** 显式确认后下载并更新固定版本。@param version 已检测版本。@param digest 镜像摘要。@param confirmation 确认文字。@returns 异步操作状态。 */
   applyOnlineUpdate: (version: string, digest: string, confirmation: string) => request<OnlineUpdateStatus>(
     '/online-updates/apply', 'POST', { version, digest, confirmation }),
+  /** 下载固定版本但不切换服务，兼容确认字段由按钮发送。@param version 已检测版本。@param digest 镜像摘要。@returns 下载状态。 */
+  downloadOnlineUpdate: (version: string, digest: string) => request<OnlineUpdateStatus>(
+    '/online-updates/download', 'POST', { version, digest, confirmation: `更新 ${version}` }),
+  /** 激活已下载且校验通过的固定版本。@param version 已准备版本。@param digest 镜像摘要。@returns 切换状态。 */
+  activateOnlineUpdate: (version: string, digest: string) => request<OnlineUpdateStatus>(
+    '/online-updates/activate', 'POST', { version, digest, confirmation: `更新 ${version}` }),
   /** 显式确认后回退转发程序。@param confirmation 确认文字。@returns 异步操作状态。 */
   rollbackOnlineUpdate: (confirmation: string) => request<OnlineUpdateStatus>('/online-updates/rollback', 'POST', { confirmation }),
   /** 游标浏览键，不执行KEYS。@param database 库名。@param cursor 扫描游标。@param pattern 匹配模式。@returns 本批键。 */

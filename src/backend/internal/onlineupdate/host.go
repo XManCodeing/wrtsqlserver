@@ -161,6 +161,12 @@ func (host *DockerHost) Preflight(ctx context.Context) error {
 
 // Pull preflights disk space, pulls an immutable reference, verifies platform/digest, then tags.
 func (host *DockerHost) Pull(ctx context.Context, release Release) error {
+	return host.PullWithProgress(ctx, release, nil)
+}
+
+// PullWithProgress streams actual Docker output through an optional runner extension.
+// report receives measured bytes only; absent/unsupported progress remains unknown.
+func (host *DockerHost) PullWithProgress(ctx context.Context, release Release, report func(DownloadProgress)) error {
 	source, sourceErr := contextSource(ctx)
 	if sourceErr != nil {
 		return sourceErr
@@ -172,9 +178,32 @@ func (host *DockerHost) Pull(ctx context.Context, release Release) error {
 		return err
 	}
 	reference := release.Image + "@" + release.Digest
-	if _, err := host.docker(ctx, "pull", reference); err != nil {
+	var err error
+	if runner, ok := host.Runner.(ProgressRunner); ok && report != nil {
+		err = runner.RunProgress(ctx, "/usr/bin/docker", []string{"--host", "unix:///var/run/docker.sock", "pull", reference}, host.environment(Release{}), report)
+	} else {
+		_, err = host.docker(ctx, "pull", reference)
+	}
+	if err != nil {
 		return errors.New("image download failed")
 	}
+	if phase, ok := ctx.Value(pullPhaseKey{}).(func()); ok {
+		phase()
+	}
+	return host.VerifyPrepared(ctx, release)
+}
+
+// VerifyPrepared validates a local immutable image and restores its deployment tag without pulling.
+// ctx carries the approved source; release must match its policy. Errors prevent activation.
+func (host *DockerHost) VerifyPrepared(ctx context.Context, release Release) error {
+	source, err := contextSource(ctx)
+	if err != nil {
+		return err
+	}
+	if err = validateReleaseFor(release, source); err != nil {
+		return err
+	}
+	reference := release.Image + "@" + release.Digest
 	data, err := host.docker(ctx, "image", "inspect", "--format", `{{json .}}`, reference)
 	if err != nil {
 		return errors.New("image verification failed")

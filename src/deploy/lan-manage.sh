@@ -135,5 +135,6 @@ case "$MODE" in
         fi
         acquire_lock "$RELAY"
         trap release_lock EXIT
+        sh "$HERE/relay-update.sh" boot-check
         lan_rules_apply "$(ports_current)";;
 esac

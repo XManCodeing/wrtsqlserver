@@ -9,7 +9,7 @@ services:
     pull_policy: never
     platform: linux/amd64
     container_name: redis-dev
-    restart: "no"
+    restart: unless-stopped
     user: "999:999"
     read_only: true
     cap_drop: [ALL]

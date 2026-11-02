@@ -23,7 +23,7 @@ export function useOnlineUpdates(active: () => boolean) {
       const result = await api.onlineUpdates()
       if (!disposed && requestedRevision === revision) { status.value = result; error.value = ''; uncertain.value = false }
     } catch {
-      if (!disposed) error.value = onlineDisconnectedMessage(status.value)
+      if (!disposed && requestedRevision === revision) error.value = onlineDisconnectedMessage(status.value)
     } finally {
       if (!disposed) {
         loading.value = false
@@ -35,29 +35,32 @@ export function useOnlineUpdates(active: () => boolean) {
   /** 提交单次显式操作；错误后的结果必须由 GET 核实。@param operation 单次 API 调用。@returns 请求结束。 */
   async function submit(operation: () => Promise<OnlineUpdateStatus>): Promise<void> {
     if (blocked.value || !status.value?.enabled) return
+    const publishRevision = revision
+    const canPublish = () => !disposed && publishRevision === revision && active()
     busy.value = true
     try {
       const result = await operation()
-      if (!disposed) { status.value = result; error.value = '' }
+      if (canPublish()) { status.value = result; error.value = '' }
     } catch (failure) {
-      if (!disposed) { uncertain.value = true; error.value = errorMessage(failure) }
-    } finally { if (!disposed) busy.value = false }
+      if (canPublish()) { uncertain.value = true; error.value = errorMessage(failure) }
+    } finally { if (!disposed) { busy.value = false; if (publishRevision !== revision) void refresh() } }
   }
 
   /** 来源变更立即清除旧版本能力，下一次 GET 才恢复按钮。@returns 无。 */
   function invalidateSource(): void {
     revision++
-    if (status.value) status.value = { ...status.value, latest: null, canApply: false }
+    if (status.value) status.value = { ...status.value, latest: null, prepared: null, downloadPercent: null, canApply: false }
     uncertain.value = true
   }
 
-  /** 按导航与文档可见性启停五秒轮询。@returns 无。 */
+  /** 按导航与文档可见性启停轮询，刷新互斥避免慢请求重叠。@returns 无。 */
   function synchronize(): void {
+    revision++
     if (timer) clearInterval(timer)
     timer = undefined
     if (!disposed && shouldPollOnline(active(), document.visibilityState)) {
       void refresh()
-      timer = setInterval(() => { void refresh() }, 5000)
+      timer = setInterval(() => { void refresh() }, 1500)
     }
   }
   document.addEventListener('visibilitychange', synchronize)

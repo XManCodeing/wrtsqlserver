@@ -180,6 +180,7 @@ updater_run_check() {
 # Optional online control is enabled only after validating the host socket directory.
 relay_run() {
     relay_image=$1
+    case "${RELAY_RESTART_POLICY:-unless-stopped}" in no|unless-stopped) ;; *) fail 'unsupported relay restart policy';; esac
     set --
     if [ -e "$USB/relay-updater/run/control.sock" ] || [ -L "$USB/relay-updater/run/control.sock" ]; then
         updater_run_check yes
@@ -193,7 +194,7 @@ relay_run() {
     done
     docker_local run -d --pull never --name "$NAME" \
       --label "$LABEL=relay-v1" --label "io.db-relay.deploy.transaction=${TRANSACTION:-initial}" \
-      --restart no --user 10001:10001 --read-only --cap-drop ALL \
+      --restart "${RELAY_RESTART_POLICY:-unless-stopped}" --user 10001:10001 --read-only --cap-drop ALL \
       --security-opt no-new-privileges:true --cpus 0.5 --memory 128m --memory-swap 128m --pids-limit 64 \
       --log-driver json-file --log-opt max-size=2m --log-opt max-file=2 \
       --tmpfs /tmp:rw,noexec,nosuid,size=8m --stop-timeout 15 \

@@ -51,7 +51,7 @@ func TestOnlineUpdateRoutesAndAuth(t *testing.T) {
 	app := testApp(t)
 	app.onlineUpdates = nil
 	cookie, csrf := loginTest(t, app)
-	for _, path := range []string{"/api/online-updates", "/api/online-updates/check", "/api/online-updates/apply", "/api/online-updates/rollback"} {
+	for _, path := range []string{"/api/online-updates", "/api/online-updates/check", "/api/online-updates/apply", "/api/online-updates/download", "/api/online-updates/activate", "/api/online-updates/rollback"} {
 		method := "POST"
 		if path == "/api/online-updates" {
 			method = "GET"
@@ -95,14 +95,14 @@ func TestOnlineUpdateUnixContract(t *testing.T) {
 	payload := `{"enabled":true,"currentVersion":"1.0.0","latest":null,"state":"checking","phase":"check","message":"checking","operationId":"one","updatedAt":"2026-11-02T03:00:00Z","canApply":false,"canRollback":false}`
 	app.onlineUpdates = fakeOnlineUpdater(t, func(writer http.ResponseWriter, request *http.Request) {
 		count.Add(1)
-		expectedMethods := map[string]string{"/status": "GET", "/check": "POST", "/apply": "POST", "/rollback": "POST"}
+		expectedMethods := map[string]string{"/status": "GET", "/check": "POST", "/apply": "POST", "/download": "POST", "/activate": "POST", "/rollback": "POST"}
 		if expectedMethods[request.URL.Path] != request.Method || request.Host != "relay-updater" {
 			t.Error("unexpected upstream route", request.Method, request.URL.Path)
 		}
 		if request.Header.Get("Cookie") != "" || request.Header.Get("X-CSRF-Token") != "" {
 			t.Error("credentials forwarded")
 		}
-		if request.URL.Path == "/apply" {
+		if request.URL.Path == "/apply" || request.URL.Path == "/download" || request.URL.Path == "/activate" {
 			var input map[string]string
 			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 				t.Error(err)
@@ -119,6 +119,8 @@ func TestOnlineUpdateUnixContract(t *testing.T) {
 	for _, operation := range []struct{ method, path, body string }{
 		{"GET", "", ""}, {"POST", "/check", ""},
 		{"POST", "/apply", `{"version":"v1.2.3","digest":"sha256:` + strings.Repeat("a", 64) + `","confirmation":"更新 v1.2.3"}`},
+		{"POST", "/download", `{"version":"v1.2.3","digest":"sha256:` + strings.Repeat("a", 64) + `","confirmation":"更新 v1.2.3"}`},
+		{"POST", "/activate", `{"version":"v1.2.3","digest":"sha256:` + strings.Repeat("a", 64) + `","confirmation":"更新 v1.2.3"}`},
 		{"POST", "/rollback", `{"confirmation":"回退转发程序"}`},
 	} {
 		response := requestAPI(app, operation.method, "/api/online-updates"+operation.path, operation.body, cookie, csrf)
@@ -126,7 +128,7 @@ func TestOnlineUpdateUnixContract(t *testing.T) {
 			t.Fatal(response.Code, response.Body.String())
 		}
 	}
-	if count.Load() != 4 {
+	if count.Load() != 6 {
 		t.Fatal(count.Load())
 	}
 	for _, path := range []string{"/status", "/anything", "/check?url=http://evil.invalid"} {
@@ -143,7 +145,7 @@ func TestOnlineUpdateUnixContract(t *testing.T) {
 	if response := requestAPI(app, "GET", "/api/online-updates/check", "", cookie, csrf); response.Code != 405 {
 		t.Fatal(response.Code)
 	}
-	if count.Load() != 4 {
+	if count.Load() != 6 {
 		t.Fatal("invalid request reached updater")
 	}
 }

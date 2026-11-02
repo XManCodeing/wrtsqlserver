@@ -5,6 +5,7 @@ All service files and fake executable state live in TemporaryDirectory. Producti
 scripts are copied and the USB preflight alone is replaced with a temp-root guard;
 separate tests exercise the real LAN and symlink rejection helpers.
 """
+import itertools
 import json
 import os
 from pathlib import Path
@@ -50,16 +51,22 @@ if args[0] == 'inspect':
         output(container.get('online_env', 'ONLINE_UPDATE_SOCKET=/run/relay-updater/control.sock' if container.get('online') else ''))
     if '.Mounts' in fmt:
         if 'ne .Type' in fmt: output(container.get('extra_mounts', 'tmpfs:/tmp;'))
-        if '.RW' in fmt: output(container.get('bind_modes', 'true;false;false;' if container.get('online') else 'true;false;'))
         root = os.environ['MOCK_ROOT'] + '/db-relay'
         mounts = root+'/data:/data;'+root+'/admin_password:/run/secrets/admin_password;'
         if container.get('online'): mounts += os.environ['MOCK_ROOT']+'/relay-updater/run:/run/relay-updater;'
-        output(container.get('mounts', mounts))
+        mounts = container.get('mounts', mounts)
+        modes = container.get('bind_modes', 'true;false;false;' if container.get('online') else 'true;false;')
+        if '.Source' in fmt and '.Destination' in fmt and '.RW' in fmt:
+            records = '\n'.join(mount.replace(':', '|') + '|' + mode
+                                for mount, mode in zip(mounts.rstrip(';').split(';'), modes.rstrip(';').split(';')))
+            output(container.get('mount_records', records))
+        if '.RW' in fmt: output(modes)
+        output(mounts)
     if '.HostConfig.PortBindings' in fmt:
         output(container.get('ports', '192.168.10.1:13306:13306/tcp;192.168.10.1:18080:8080/tcp;'))
     if '.HostConfig.Privileged' in fmt:
         output(container.get('security', 'false|true|default|500000000|134217728|134217728|64|["ALL"]|["no-new-privileges:true"]|[]||null'))
-    if '.Config.User' in fmt: output(container.get('user', '10001:10001 no'))
+    if '.Config.User' in fmt: output(container.get('user', '10001:10001') + ' ' + container.get('restart', 'no') if 'user' not in container or ' ' not in container['user'] else container['user'])
     if fmt == '{{.State.Status}}': output(container.get('status', 'running' if container['running'] else 'exited'))
     if fmt == '{{.State.Running}}': output(str(container['running']).lower())
     if '.State.ExitCode' in fmt: output('false 0')
@@ -74,8 +81,15 @@ if args[0] == 'rm':
     assert state[names[0]]['running'] is False
     del state[names[0]]
     save(); sys.exit(0)
+if args[0] == 'update':
+    names = [name for name, item in state.items() if item['id'] == args[-1]]
+    assert len(names) == 1 and len(args[-1]) == 64
+    if os.environ.get('FAIL_UPDATE_POLICY') == args[-2]: sys.exit(1)
+    state[names[0]]['restart'] = args[-2]
+    save(); sys.exit(0)
 if args[0] in ('stop', 'start'):
-    state[args[-1]]['running'] = args[0] == 'start'
+    name = args[-1] if args[-1] in state else next(name for name, item in state.items() if item['id'] == args[-1])
+    state[name]['running'] = args[0] == 'start'
     save(); sys.exit(0)
 if args[0] == 'rename':
     assert args[2] not in state
@@ -85,7 +99,7 @@ if args[0] == 'run':
     assert name not in state
     transaction = next((arg.split('=', 1)[1] for arg in args if arg.startswith('io.db-relay.deploy.transaction=')), 'initial')
     state[name] = {'id': os.environ.get('MOCK_ID', 'b'*64), 'running': True, 'transaction': transaction,
-                   'image': args[-1],
+                   'image': args[-1], 'restart': args[args.index('--restart')+1],
                    'ports': ''.join(value + ';' for index, value in enumerate(args) if index > 0 and args[index-1] == '-p'),
                    'online': 'ONLINE_UPDATE_SOCKET=/run/relay-updater/control.sock' in args}
     save()
@@ -229,6 +243,48 @@ print(result)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((relay / 'transaction').exists())
         self.assertTrue(all(command[0] in ('image', 'container', 'inspect') for command in self.commands()))
+
+    def test_bind_records_accept_every_order_and_reject_unsafe_layouts(self):
+        """Check all bind permutations and unsafe records; return None, never mutate Docker."""
+        relay = self.relay_fixture()
+        home = self.updater_fixture()
+        common = self.deploy/'common.sh'
+        common.write_text(common.read_text().replace(
+            '[ -S "$USB/relay-updater/run/control.sock" ]',
+            '[ -f "$USB/relay-updater/run/control.sock" ]'))
+        socket = home/'run/control.sock'
+        socket.write_text('mock socket inode')
+        socket.chmod(0o660)
+        records = [f'{relay}/data|/data|true',
+                   f'{relay}/admin_password|/run/secrets/admin_password|false',
+                   f'{home}/run|/run/relay-updater|false']
+        state = json.loads(self.state.read_text())
+        for online in (False, True):
+            state['db-relay']['online'] = online
+            for ordered in itertools.permutations(records if online else records[:2]):
+                with self.subTest(online=online, ordered=ordered):
+                    state['db-relay']['mount_records'] = '\n'.join(ordered)
+                    self.state.write_text(json.dumps(state))
+                    result = self.invoke('relay-update.sh', 'check')
+                    self.assertEqual(result.returncode, 0, result.stderr)
+        unsafe_records = [
+            [records[0].replace('|true', '|false'), *records[1:]],
+            [records[0], records[1].replace('|false', '|true'), records[2]],
+            [*records[:2], records[2].replace('|false', '|true')],
+            [records[0].replace(str(relay), '/foreign'), *records[1:]],
+            [records[0].replace('|/data|', '|/other|'), *records[1:]],
+            records[:2], records[1:], [*records, records[0]],
+            [*records, '/foreign|/extra|false'],
+        ]
+        for unsafe in unsafe_records:
+            with self.subTest(unsafe=unsafe):
+                state['db-relay']['mount_records'] = '\n'.join(unsafe)
+                self.state.write_text(json.dumps(state))
+                result = self.invoke('relay-update.sh', 'check')
+                self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((relay/'transaction').exists())
+        self.assertTrue(all(command[0] in ('image', 'container', 'inspect')
+                            for command in self.commands()))
 
     def test_apply_and_explicit_rollback(self):
         """Successful update retains old container; rollback restores matching pair."""

@@ -58,9 +58,13 @@ func NewService(store Store, host Host, source ReleaseSource, logger *log.Logger
 	if inspectErr == nil {
 		service.record.Status.CurrentVersion = current
 	}
+	service.restorePrepared(ctx, current)
+	record = service.record
 	hasTransaction := host.HasTransaction()
 	interrupted := activeState(record.Status.State) || record.Status.State == "manual_recovery"
-	if interrupted || hasTransaction && (!record.Status.CanRollback && record.Status.State != "rolled_back" || inspectErr != nil) {
+	completedDownload := record.Status.Phase == "downloaded" || record.Status.Phase == "download"
+	retainedRollback := completedDownload && host.Marker("rolled-back")
+	if interrupted || hasTransaction && (!record.Status.CanRollback && record.Status.State != "rolled_back" && !retainedRollback || inspectErr != nil) {
 		service.record.Status.State = "manual_recovery"
 		service.record.Status.Phase = "recovery"
 		service.record.Status.Message = "发现未完成操作或无法确认事务运行状态；不会自动重试，请核查事务后明确回退"
@@ -70,10 +74,12 @@ func NewService(store Store, host Host, source ReleaseSource, logger *log.Logger
 		service.record.Status.Phase = "version"
 		service.record.Status.CurrentVersion = ""
 		service.record.Status.Latest = nil
+		service.clearPreparedLocked()
 		service.record.Status.CanRollback = false
 		service.record.Status.Message = "尚未确认受管转发容器正在运行；容器就绪后可手动重新检测"
 	}
 	service.record.Status.Enabled = true
+	service.record.Status.StagedUpdates = true
 	if err = service.persistLocked(); err != nil {
 		return nil, err
 	}
@@ -88,6 +94,14 @@ func (service *Service) Status() Status {
 	if status.Latest != nil {
 		release := *status.Latest
 		status.Latest = &release
+	}
+	if status.Prepared != nil {
+		release := *status.Prepared
+		status.Prepared = &release
+	}
+	if status.DownloadPercent != nil {
+		percent := *status.DownloadPercent
+		status.DownloadPercent = &percent
 	}
 	return status
 }
@@ -127,6 +141,9 @@ func (service *Service) beginLocked(state, phase, message string) error {
 	if _, err := rand.Read(identifier[:]); err != nil {
 		return errors.New("无法创建安全操作标识")
 	}
+	if phase != "download" {
+		service.record.DownloadOnly = false
+	}
 	service.busy = true
 	service.record.Status.OperationID = hex.EncodeToString(identifier[:])
 	service.record.Status.State = state
@@ -164,6 +181,7 @@ func (service *Service) check() {
 		service.busy = false
 		service.record.Status.CurrentVersion = ""
 		service.record.Status.Latest = nil
+		service.clearPreparedLocked()
 		if service.host.HasTransaction() {
 			service.record.Status.CanRollback = true
 			service.completeLocked("manual_recovery", "version", "无法确认保留事务的运行容器；请核查事务后明确回退")
@@ -180,35 +198,43 @@ func (service *Service) check() {
 	service.busy = false
 	if err != nil {
 		service.record.Status.Latest = nil
+		service.clearPreparedLocked()
 		service.completeLocked("failed", "check", "检测失败；请检查宿主配置及私有仓库读取权限")
 		return
 	}
 	if validateReleaseFor(release, service.record.Source) != nil {
 		service.record.Status.Latest = nil
+		service.clearPreparedLocked()
 		service.completeLocked("failed", "check", "发布信息未通过安全校验")
 		return
 	}
 	service.record.Status.CurrentVersion = current
 	service.record.Status.Latest = &release
-	if newer(release.Version, current) {
+	if service.record.Status.Prepared != nil && (*service.record.Status.Prepared != release || !newer(release.Version, current)) {
+		service.clearPreparedLocked()
+	}
+	if service.record.Status.Prepared != nil {
+		service.completeLocked("downloaded", "downloaded", "下载完成，可稍后或立即重启生效")
+	} else if newer(release.Version, current) {
 		service.completeLocked("available", "ready", "发现可用正式版本")
 	} else {
 		service.completeLocked("idle", "ready", "当前已是最新版本")
 	}
 }
 
-// Apply validates cached identity and exact human confirmation; no arbitrary version is accepted.
+// Apply validates cached identity and the legacy machine confirmation; no arbitrary version is accepted.
 func (service *Service) Apply(version, digest, confirmation string) error {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	status := service.record.Status
-	if status.State == "manual_recovery" || status.Latest == nil || version != status.Latest.Version || digest != status.Latest.Digest || confirmation != "更新 "+version || !newer(version, status.CurrentVersion) {
-		return errors.New("更新确认或缓存版本不匹配")
+	release, err := service.validateUpdateLocked(version, digest, confirmation)
+	if err != nil {
+		return err
 	}
-	release := *status.Latest
-	if validateReleaseFor(release, service.record.Source) != nil {
-		return errors.New("发布信息无效")
+	if service.busy || service.broken {
+		return errors.New("已有操作正在执行或需要宿主恢复")
 	}
+	service.clearPreparedLocked()
+	service.record.DownloadOnly = false
 	if err := service.beginLocked("downloading", "download", "正在进行磁盘预检和镜像下载"); err != nil {
 		return err
 	}
@@ -266,19 +292,25 @@ func (service *Service) apply(release Release) {
 		service.finish("failed", "download", "下载或磁盘预检失败；未替换运行容器")
 		return
 	}
+	service.deploy(release, current)
+}
+
+// deploy executes the shared durable transaction after either legacy pull or staged verification.
+// release is approved and local; current is the freshly inspected running version.
+func (service *Service) deploy(release Release, current string) {
 	ctx, cancel := context.WithTimeout(sourceContext(context.Background(), service.Source()), 3*time.Minute)
 	defer cancel()
 	if !service.prepareTransaction(ctx, release, current) {
 		return
 	}
-	if err = service.host.Script(ctx, "check", release); err != nil {
+	if err := service.host.Script(ctx, "check", release); err != nil {
 		service.finish("failed", "preflight", "部署检查失败；未替换运行容器")
 		return
 	}
 	if !service.stage("apply", "正在替换转发容器并检查健康状态") {
 		return
 	}
-	err = service.host.Script(ctx, "apply", release)
+	err := service.host.Script(ctx, "apply", release)
 	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		service.mu.Lock()
 		service.record.Status.CanRollback = service.host.HasTransaction()
@@ -352,6 +384,10 @@ func (service *Service) Rollback(confirmation string) error {
 		return errors.New("回退确认无效或无可回退事务")
 	}
 	if err := service.beginLocked("applying", "rollback", "正在恢复上个转发版本和一致性数据备份"); err != nil {
+		return err
+	}
+	service.clearPreparedLocked()
+	if err := service.persistLocked(); err != nil {
 		return err
 	}
 	go service.rollback()

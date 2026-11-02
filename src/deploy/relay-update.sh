@@ -20,7 +20,7 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$HERE/lan-rules.sh"
 MODE=${1:-check}
 [ "$#" -le 1 ] || fail 'one operation argument required'
-case "$MODE" in check|apply|rollback|finalize|ports-status|ports-rules|ports-check|ports-apply) ;; *) fail 'unsupported relay operation';; esac
+case "$MODE" in check|apply|rollback|finalize|restart-migrate|boot-check|ports-status|ports-rules|ports-check|ports-apply) ;; *) fail 'unsupported relay operation';; esac
 TX=$RELAY/transaction
 FAILED=db-relay-failed
 TRANSACTION=upgrade-v1
@@ -69,25 +69,30 @@ check_layout() {
     managed "$layout_name"
     extra_mounts=$(docker_local inspect --format '{{range .Mounts}}{{if ne .Type "bind"}}{{.Type}}:{{.Destination}};{{end}}{{end}}' "$layout_name")
     case "$extra_mounts" in ''|'tmpfs:/tmp;') ;; *) fail 'unsupported non-bind mount';; esac
-    mounts=$(docker_local inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}:{{.Destination}};{{end}}{{end}}' "$layout_name")
-    base_mounts="$RELAY/data:/data;$RELAY/admin_password:/run/secrets/admin_password;"
+    # Docker may reorder Mounts across inspect calls. Compare complete records from
+    # one snapshot, never pair independent path and RW sequences by array index.
+    mount_records=$(docker_local inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{printf "%s|%s|%t\n" .Source .Destination .RW}}{{end}}{{end}}' "$layout_name")
+    mounts=$(printf '%s\n' "$mount_records" | LC_ALL=C sort)
+    base_mounts=$(printf '%s\n' "$RELAY/data|/data|true" "$RELAY/admin_password|/run/secrets/admin_password|false" | LC_ALL=C sort)
+    online_mounts=$(printf '%s\n' "$base_mounts" "$USB/relay-updater/run|/run/relay-updater|false" | LC_ALL=C sort)
     online_env=$(docker_local inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$layout_name" | awk '/^ONLINE_UPDATE_SOCKET=/{print}')
-    bind_modes=$(docker_local inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.RW}};{{end}}{{end}}' "$layout_name")
     case "$mounts" in
         "$base_mounts")
-            [ "$bind_modes" = 'true;false;' ] && [ -z "$online_env" ] || fail 'unsupported original bind modes/environment'
+            [ -z "$online_env" ] || fail 'unsupported original bind environment'
             ;;
-        "$base_mounts$USB/relay-updater/run:/run/relay-updater;"|"$RELAY/data:/data;$USB/relay-updater/run:/run/relay-updater;$RELAY/admin_password:/run/secrets/admin_password;")
-            [ "$bind_modes" = 'true;false;false;' ] || fail 'updater bind must be readonly'
+        "$online_mounts")
             [ "$online_env" = ONLINE_UPDATE_SOCKET=/run/relay-updater/control.sock ] || fail 'unsupported updater environment'
-            updater_run_check yes
+            if [ "$MODE" = boot-check ]; then updater_run_check no; else updater_run_check yes; fi
             REQUIRE_ONLINE_UPDATE=yes
             ;;
-        *) fail 'unsupported bind layout';;
+        *) fail 'unsupported bind paths or read/write permissions';;
     esac
     ports=$(docker_local inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{range $bindings}}{{.HostIp}}:{{.HostPort}}:{{$port}};{{end}}{{end}}' "$layout_name")
     ports_layout "$layout_name"
-    [ "$(docker_local inspect --format '{{.Config.User}} {{.HostConfig.RestartPolicy.Name}}' "$layout_name")" = '10001:10001 no' ] || fail 'unsupported user/restart policy'
+    case "$(docker_local inspect --format '{{.Config.User}} {{.HostConfig.RestartPolicy.Name}}' "$layout_name")" in
+        '10001:10001 no'|'10001:10001 unless-stopped') ;;
+        *) fail 'unsupported user/restart policy';;
+    esac
     security_profile=$(docker_local inspect --format '{{.HostConfig.Privileged}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.PidsLimit}}|{{json .HostConfig.CapDrop}}|{{json .HostConfig.SecurityOpt}}|{{json .HostConfig.Devices}}|{{.HostConfig.PidMode}}|{{json .HostConfig.CapAdd}}' "$layout_name")
     case "$security_profile" in
         'false|true|default|500000000|134217728|134217728|64|["ALL"]|["no-new-privileges:true"]|[]||null'|'false|true|default|500000000|134217728|134217728|64|["ALL"]|["no-new-privileges:true"]|[]||[]') ;;
@@ -100,6 +105,50 @@ full_id() {
     case "$full_value" in ''|*[!0-9a-f]*) fail 'invalid container identity';; esac
     [ "${#full_value}" = 64 ] || fail 'container identity must be full length'
     printf '%s\n' "$full_value"
+}
+# restart_policy(name, policy): validate layout and pin full identity before policy change.
+# Caller holds deployment lock and has validated transaction ownership; returns Docker status.
+restart_policy() {
+    check_layout "$1"
+    restart_id=$(full_id "$1")
+    log "setting $1 restart policy to $2"
+    docker_local update --restart "$2" "$restart_id" >/dev/null
+}
+# migrate_restart(): explicitly reconcile completed/current relay roles without starting it.
+# Retained completed journals are supported; interrupted journals remain manual recovery.
+migrate_restart() {
+    check_layout "$NAME"
+    if [ -d "$TX" ]; then
+        finalize_journal
+        if [ -e "$TX/rolled-back" ]; then
+            validate_original "$NAME"
+            require_absent "$OLD"
+            if [ -n "$(container_id "$FAILED")" ]; then
+                finalize_candidate "$FAILED"
+                standby=$FAILED
+            else
+                [ ! -e "$TX/candidate-id" ] || fail 'journal candidate unexpectedly missing'
+                standby=
+            fi
+        elif [ -e "$TX/applied" ]; then
+            finalize_candidate "$NAME"
+            validate_original "$OLD"
+            standby=$OLD
+            require_absent "$FAILED"
+        else
+            fail 'unfinished transaction requires explicit rollback before restart migration'
+        fi
+        if [ -n "$standby" ]; then
+            check_layout "$standby"
+            [ "$(docker_local inspect --format '{{.State.Running}}' "$standby")" = false ] || fail 'standby container must be stopped'
+            restart_policy "$standby" no
+        fi
+    else
+        require_absent "$OLD"
+        require_absent "$FAILED"
+    fi
+    restart_policy "$NAME" unless-stopped
+    log 'relay restart migration complete; running/stopped state unchanged'
 }
 # save_candidate(): persist exact candidate identity before accepting its health.
 # Recovery may call this after docker run returned an ambiguous failure.
@@ -274,12 +323,14 @@ recover() {
     ORIGINAL=$(original_id)
     [ ! -e "$TX/finalizing" ] || fail 'interrupted finalization requires manual review'
     TRANSACTION=$ORIGINAL
-    [ ! -e "$TX/rolled-back" ] || { log 'transaction already rolled back'; return 0; }
+    [ ! -e "$TX/rolled-back" ] || { migrate_restart; log 'transaction already rolled back'; return 0; }
     old_id=$(container_id "$OLD")
     active_id=$(container_id "$NAME")
     if [ -n "$old_id" ]; then
         validate_original "$OLD"
         check_layout "$OLD"
+        restart_policy "$OLD" no
+        [ "$(docker_local inspect --format '{{.State.Running}}' "$OLD")" = false ] || fail 'rollback container unexpectedly running'
         if [ -n "$active_id" ]; then
             managed "$NAME"
             [ "$(docker_local inspect --format '{{index .Config.Labels "io.db-relay.deploy.transaction"}}' "$NAME")" = "$TRANSACTION" ] || fail 'candidate transaction mismatch'
@@ -288,9 +339,15 @@ recover() {
             require_absent "$FAILED"
             # Candidate may be unhealthy/crashed; stopping must succeed, but its
             # exit code is not trusted as a migration success signal.
+            restart_policy "$NAME" no
             docker_local stop -t 30 "$NAME" >/dev/null
             [ "$(docker_local inspect --format '{{.State.Running}}' "$NAME")" = false ] || fail 'candidate still running'
             docker_local rename "$NAME" "$FAILED"
+        fi
+        if [ -n "$(container_id "$FAILED")" ]; then
+            finalize_candidate "$FAILED"
+            restart_policy "$FAILED" no
+            [ "$(docker_local inspect --format '{{.State.Running}}' "$FAILED")" = false ] || fail 'failed container unexpectedly running'
         fi
         [ -e "$TX/backup-ready" ] || fail 'old renamed without committed snapshot'
         restore_pair
@@ -307,10 +364,18 @@ recover() {
         fi
     fi
     ports_restore
+    if [ -n "$(container_id "$FAILED")" ]; then
+        finalize_candidate "$FAILED"
+        restart_policy "$FAILED" no
+        [ "$(docker_local inspect --format '{{.State.Running}}' "$FAILED")" = false ] || fail 'failed container unexpectedly running'
+    fi
+    validate_original "$NAME"
+    restart_policy "$NAME" no
     log 'restarting original relay only'
-    docker_local start "$NAME" >/dev/null
+    docker_local start "$restart_id" >/dev/null
     relay_health || fail 'original relay health failed; retained journal requires review'
     mark rolled-back
+    restart_policy "$NAME" unless-stopped
     log 'rollback complete; prior config/key restored; all candidate data retained'
 }
 # finish(status): trap handler; run rollback in isolated subshell to catch failures.
@@ -349,12 +414,14 @@ apply_update() {
     RECOVER_ON_EXIT=yes
     mark stopping
     log 'stopping relay for consistent config/key backup; Redis unaffected'
+    validate_original "$NAME"
+    restart_policy "$NAME" no
     stop_checked "$NAME"
     backup_pair
     validate_original "$NAME"
     docker_local rename "$NAME" "$OLD"
     mark launching
-    relay_run "$IMAGE_ID"
+    RELAY_RESTART_POLICY=no relay_run "$IMAGE_ID"
     save_candidate
     if [ -e "$TX/ports-original" ]; then ports_commit; fi
     relay_health || fail 'candidate health failed'
@@ -368,6 +435,8 @@ apply_update() {
         sync
     fi
     mark applied
+    finalize_candidate "$NAME"
+    restart_policy "$NAME" unless-stopped
     RECOVER_ON_EXIT=no
     log 'update healthy; stopped rollback container and consistent snapshot retained'
 }
@@ -396,6 +465,40 @@ if [ "$MODE" = ports-check ] && [ -d "$TX" ]; then
     finalize_journal
     check_layout
     ports_preflight
+    exit 0
+fi
+if [ "$MODE" = boot-check ]; then
+    check_layout "$NAME"
+    if [ -d "$TX" ]; then
+        finalize_journal
+        if [ -e "$TX/rolled-back" ]; then
+            validate_original "$NAME"
+            require_absent "$OLD"
+            if [ -n "$(container_id "$FAILED")" ]; then
+                finalize_candidate "$FAILED"
+            else
+                [ ! -e "$TX/candidate-id" ] || fail 'journal candidate unexpectedly missing'
+            fi
+        elif [ -e "$TX/applied" ]; then
+            finalize_candidate "$NAME"
+            validate_original "$OLD"
+            check_layout "$OLD"
+            require_absent "$FAILED"
+        else
+            fail 'unfinished transaction blocks LAN restore'
+        fi
+    else
+        require_absent "$OLD"
+        require_absent "$FAILED"
+    fi
+    exit 0
+fi
+if [ "$MODE" = restart-migrate ]; then
+    acquire_lock "$RELAY"
+    trap finish EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' HUP TERM
+    migrate_restart
     exit 0
 fi
 if [ "$MODE" = rollback ] || [ "$MODE" = finalize ]; then

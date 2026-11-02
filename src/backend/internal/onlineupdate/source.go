@@ -101,12 +101,21 @@ func (service *Service) SaveSource(source Source) (Source, error) {
 	candidate := service.record
 	candidate.Source = normalized
 	candidate.Status.Latest = nil
+	candidate.Status.Prepared = nil
+	candidate.PreparedSource = Source{}
+	candidate.DownloadOnly = false
+	candidate.Status.DownloadPercent = nil
+	candidate.Status.DownloadedBytes = 0
+	candidate.Status.TotalBytes = 0
 	candidate.Status.CanApply = false
 	candidate.Status.State = "idle"
 	candidate.Status.Phase = "source"
 	candidate.Status.Message = "更新来源已保存，请手动检测正式版本"
 	candidate.Status.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err = service.store.Save(candidate); err != nil {
+		service.broken = true
+		service.record.Status.Enabled = false
+		service.record.Status.CanApply = false
 		service.log("source persistence failed")
 		return Source{}, errors.New("更新来源保存失败，原配置保持不变")
 	}

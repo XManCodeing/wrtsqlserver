@@ -56,14 +56,21 @@ func (service *Service) Handler() http.Handler {
 			if err == nil {
 				err = service.Check()
 			}
-		case "/apply":
+		case "/apply", "/download", "/activate":
 			var body struct {
 				Version      string `json:"version"`
 				Digest       string `json:"digest"`
 				Confirmation string `json:"confirmation"`
 			}
 			if err = decodeStrict(request.Body, 4096, &body); err == nil {
-				err = service.Apply(body.Version, body.Digest, body.Confirmation)
+				operation := service.Apply
+				if request.URL.Path == "/download" {
+					operation = service.Download
+				}
+				if request.URL.Path == "/activate" {
+					operation = service.Activate
+				}
+				err = operation(body.Version, body.Digest, body.Confirmation)
 			}
 		case "/rollback":
 			var body struct {

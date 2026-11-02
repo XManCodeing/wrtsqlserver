@@ -82,7 +82,7 @@ func onlineRequestBody(writer http.ResponseWriter, request *http.Request, action
 			return nil, false
 		}
 		payload = input
-	case "/apply":
+	case "/apply", "/download", "/activate":
 		input := struct {
 			Version      string `json:"version"`
 			Digest       string `json:"digest"`
@@ -135,7 +135,7 @@ func (app *App) handleOnlineUpdates(writer http.ResponseWriter, request *http.Re
 	if action == "/source" && request.Method == http.MethodGet {
 		method = http.MethodGet
 	}
-	if action != "/source" && action != "/status" && action != "/check" && action != "/apply" && action != "/rollback" || request.URL.Path == "/api/online-updates/status" {
+	if action != "/source" && action != "/status" && action != "/check" && action != "/apply" && action != "/download" && action != "/activate" && action != "/rollback" || request.URL.Path == "/api/online-updates/status" {
 		apiError(writer, 404, "API endpoint not found")
 		return
 	}

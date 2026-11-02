@@ -1,9 +1,21 @@
-export type OnlineUpdateState = 'idle' | 'checking' | 'available' | 'downloading' | 'applying' | 'succeeded' | 'rolled_back' | 'failed' | 'manual_recovery'
+export type OnlineUpdateState = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'applying' | 'succeeded' | 'rolled_back' | 'failed' | 'manual_recovery'
+
+export interface OnlineRelease {
+  version: string
+  image: string
+  digest: string
+  platform: string
+}
 
 export interface OnlineUpdateStatus {
   enabled: boolean
   currentVersion: string
-  latest: { version: string; image: string; digest: string; platform: string } | null
+  latest: OnlineRelease | null
+  stagedUpdates?: boolean
+  prepared?: OnlineRelease | null
+  downloadPercent?: number | null
+  downloadedBytes?: number
+  totalBytes?: number
   state: OnlineUpdateState
   phase: string
   message: string
@@ -15,7 +27,7 @@ export interface OnlineUpdateStatus {
 
 const stateLabels: Record<OnlineUpdateState, string> = {
   idle: '待检测', checking: '正在检测', available: '发现新版本', downloading: '正在下载镜像',
-  applying: '正在切换并检查健康状态', succeeded: '更新成功', rolled_back: '已回退',
+  applying: '正在重启并检查健康状态', downloaded: '已下载，待重启', succeeded: '更新成功', rolled_back: '已回退',
   failed: '更新失败', manual_recovery: '需要人工恢复',
 }
 
@@ -24,6 +36,26 @@ export function onlinePhaseLabel(status: OnlineUpdateStatus | null): string {
   if (!status) return '正在读取'
   if (!status.enabled) return '未启用'
   return stateLabels[status.state] ?? '未知状态'
+}
+
+/** 仅显示宿主真实下载百分比；未知长度不制造进度。@param status 当前快照。@returns 百分比或 null。 */
+export function onlineDownloadPercent(status: OnlineUpdateStatus | null): number | null {
+  const value = status?.downloadPercent
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100
+    ? Math.floor(value) : null
+}
+
+/** 格式化真实传输字节；缺少统计时不宣称下载大小。@param bytes 字节计数。@returns 简短大小文本。 */
+export function onlineTransferSize(bytes: number | undefined): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return ''
+  if (bytes < 1024) return `${Math.floor(bytes)} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** 用户打开弹窗时才检测，已有任务或待重启包不被自动检测覆盖。@param status 当前快照。@returns 是否可自动检测。 */
+export function canCheckOnOpen(status: OnlineUpdateStatus | null): boolean {
+  return !!status?.enabled && !onlineOperationActive(status) && !status.prepared && status.state !== 'manual_recovery'
 }
 
 /** 判断更新器是否忙碌。@param status 当前快照。@returns 是否正在执行操作。 */

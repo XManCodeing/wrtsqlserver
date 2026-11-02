@@ -29,7 +29,7 @@ globalThis.document = {
   addEventListener: (_event, callback) => { visibilityListener = callback },
   removeEventListener: (_event, callback) => { assert.equal(callback, visibilityListener); visibilityListener = undefined },
 }
-globalThis.setInterval = (callback, delay) => { assert.equal(delay, 5000); timer = callback; return 1 }
+globalThis.setInterval = (callback, delay) => { assert.equal(delay, 1500); timer = callback; return 1 }
 globalThis.clearInterval = () => { timer = undefined }
 let source = compile('../src/composables/useOnlineUpdates.ts').replace(/^import .*;\n/gm, '')
 source = `const { computed, onUnmounted, ref, watch, api, errorMessage, onlineDisconnectedMessage, onlineOperationActive, shouldPollOnline } = globalThis.__onlineHarness;\n${source}`
@@ -95,9 +95,28 @@ await pending
 await Promise.resolve()
 assert.equal(model.status.value.latest, null, 'old in-flight status cannot restore a stale source release')
 assert.equal(model.status.value.canApply, false)
+// 关闭弹窗后的旧请求不得覆盖重新打开时获取的状态。
+let resolveClosedRead
+fakeApi.onlineUpdates = () => new Promise(resolve => { resolveClosedRead = resolve })
+const closedRead = model.refresh()
 active = false
 watcher()
 assert.equal(timer, undefined)
+resolveClosedRead({ ...snapshot, state: 'failed', message: 'stale closed result' })
+await closedRead
+assert.notEqual(model.status.value.message, 'stale closed result')
+active = true
+fakeApi.onlineUpdates = async () => ({ ...snapshot, state: 'downloaded', prepared: { version: '1.2.3' }, message: 'ready' })
+watcher()
+await Promise.resolve()
+assert.equal(model.status.value.state, 'downloaded')
+let finishClosedWrite
+const closedWrite = model.submit(() => new Promise(resolve => { finishClosedWrite = resolve }))
+active = false
+watcher()
+finishClosedWrite({ ...snapshot, state: 'failed', message: 'stale write' })
+await closedWrite
+assert.equal(model.status.value.message, 'ready')
 unmount()
 assert.equal(visibilityListener, undefined)
-console.log('Online composable: five-second active/visible polling, no hidden refresh, state preservation, no automatic/repeated POST and cleanup passed')
+console.log('Online composable: 1.5-second active/visible polling, no hidden refresh, state preservation, no automatic/repeated POST and cleanup passed')
