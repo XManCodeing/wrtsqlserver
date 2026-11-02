@@ -1,0 +1,25 @@
+src/frontend/node_modules/
+src/frontend/dist/
+src/backend/db-relay
+src/backend/data/
+src/.local/
+.env*
+*.log
+*secret*
+
+# Local executables, packages, previews and credentials are never uploaded.
+src/deploy/deploy-stat
+src/backend/deploy-stat
+release/
+*.tar
+*.tar.gz
+*.zip
+/redis-*.png
+**/__pycache__/
+*.pyc
+.DS_Store
+**/admin_password
+**/credentials*
+**/.docker/
+*.pem
+*.key

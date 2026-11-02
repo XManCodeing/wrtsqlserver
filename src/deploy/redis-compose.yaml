@@ -1,0 +1,50 @@
+# Reference only: OpenWrt Docker 20.10 has NO Compose. Prefer redis-init.sh.
+# Compose cannot enforce UUID/mount/interface/confirmation checks. Do not run it
+# without equivalent manual verification. Must use existing manually initialized
+# USB paths; bind.create_host_path=false requires a recent Compose implementation.
+# No password: LAN binding is NOT a source ACL; never expose to untrusted clients.
+services:
+  redis-dev:
+    image: redis:7.4.7-alpine
+    pull_policy: never
+    platform: linux/amd64
+    container_name: redis-dev
+    restart: "no"
+    user: "999:999"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    stop_grace_period: 30s
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    labels:
+      io.db-relay.deploy.managed: redis-v1
+    ports:
+      - "${LAN_BIND_IP:?Explicit verified LAN IPv4 required}:6379:6379/tcp"
+    volumes:
+      - type: bind
+        source: /mnt/docker-usb/redis-dev/data
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/docker-usb/redis-dev/config/redis.conf
+        target: /usr/local/etc/redis/redis.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"

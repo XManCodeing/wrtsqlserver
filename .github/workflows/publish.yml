@@ -1,0 +1,111 @@
+name: Publish relay image
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, for example 1.0.0 (use a new version for every release)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-release-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate version and image name
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${REF_NAME#v}"
+          fi
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { printf 'Invalid release version\n' >&2; exit 1; }
+          image="ghcr.io/${REPOSITORY,,}"
+          printf 'version=%s\nimage=%s\n' "$version" "$image" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/frontend/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+      - name: Test frontend
+        working-directory: src/frontend
+        run: npm ci && npm test && npm run build
+      - name: Test backend
+        working-directory: src/backend
+        run: go test -race ./... && go vet ./...
+      - name: Test deployment isolation
+        run: python3 -m unittest discover -s src/deploy/tests -v
+      - name: Package manual deployment tools
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -eu
+          (cd src/backend && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o ../deploy/deploy-stat ./cmd/deploy-stat)
+          mkdir -p release
+          tar -czf "release/db-relay-deploy-$VERSION.tar.gz" -C src/deploy common.sh redis-init.sh relay-init.sh relay-update.sh redis.conf deploy-stat
+          (cd release && sha256sum "db-relay-deploy-$VERSION.tar.gz" > SHA256SUMS)
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push linux/amd64 image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./src
+          file: ./src/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}
+          build-args: VERSION=${{ steps.release.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+          # Older Docker 20.10 hosts: publish a conventional image without attestation manifests.
+          provenance: false
+          sbom: false
+      - name: Record exact image identity
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ steps.release.outputs.version }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -eu
+          printf '%s:%s\n%s@%s\n' "$IMAGE" "$VERSION" "$IMAGE" "$DIGEST" > release/IMAGE.txt
+          printf 'Image: `%s:%s`\n\nDigest: `%s`\n\nDownload the matching manual-deploy artifact. No router deployment was performed.\n' "$IMAGE" "$VERSION" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-relay-deploy-${{ steps.release.outputs.version }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,63 @@
+# Reference only. OpenWrt Docker 20.10 has NO Compose: use deploy/relay-init.sh.
+# Modern Compose is needed for bind.create_host_path=false and pull_policy.
+# Compose does NOT enforce USB UUID, mount or LAN checks: manually perform all
+# deploy script checks first. Do not create host paths on a missing USB mount.
+# Management HTTP is plaintext; LAN binding is not source isolation. No WAN.
+# Set a mapping in the UI to 0.0.0.0:13306 with explicit allowedCIDRs.
+# Redis is intentionally separate in deploy/redis-compose.yaml; relay updates
+# must never operate on the Redis container, configuration or data.
+services:
+  db-relay:
+    image: "${RELAY_IMAGE:?Set a locally imported versioned relay image}"
+    pull_policy: never
+    platform: linux/amd64
+    container_name: db-relay
+    restart: "no"
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    stop_grace_period: 15s
+    # Script-managed updates require this label AND exact expected mounts/ports.
+    labels:
+      io.db-relay.deploy.managed: relay-v1
+    environment:
+      LISTEN_ADDR: "0.0.0.0:8080"
+      APP_DATA_DIR: /data
+      WEB_DIR: /app/web
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      MAX_CONNECTIONS: "128"
+      # Read-only PING/INFO via the independently published Redis LAN port.
+      # This does not start Redis or grant Docker access; routing must be verified.
+      REDIS_ADDR: "${LAN_BIND_IP:?Set verified LAN IPv4}:6379"
+    volumes:
+      - type: bind
+        source: /mnt/docker-usb/db-relay/data
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/docker-usb/db-relay/admin_password
+        target: /run/secrets/admin_password
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m
+    ports:
+      - "${LAN_BIND_IP:?Set verified LAN IPv4}:18080:8080/tcp"
+      - "${LAN_BIND_IP:?Set verified LAN IPv4}:13306:13306/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O - http://127.0.0.1:8080/api/session | grep -q '\"authenticated\":false'"]
+      interval: 5s
+      timeout: 4s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
