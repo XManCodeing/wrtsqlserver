@@ -2,13 +2,14 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errorMessage, safeMessage } from '../api'
-import { endpoint, mappingInput } from '../validation'
+import { endpoint, mappingCopyName, mappingInput, validateMapping } from '../validation'
 import type { MappingRecord, ProxyRecord } from '../types'
+import type { PortsStatus } from '../composables/portsState'
 import { useConnectivity } from '../composables/useConnectivity'
 import MappingDialog from './MappingDialog.vue'
 import ConnectivityHistory from './ConnectivityHistory.vue'
 
-const props = defineProps<{ mappings: MappingRecord[]; proxies: ProxyRecord[]; loading: boolean; active: boolean; proxyRevision: number }>()
+const props = defineProps<{ mappings: MappingRecord[]; proxies: ProxyRecord[]; loading: boolean; active: boolean; proxyRevision: number; portStatus?: PortsStatus | null }>()
 const emit = defineEmits<{ changed: []; createProxy: [] }>()
 const editor = ref<InstanceType<typeof MappingDialog>>()
 const query = ref('')
@@ -26,6 +27,15 @@ const { histories, now, error: historyError, loading: historyLoading, probing, p
   revision: () => JSON.stringify([props.proxyRevision, props.proxies,
     props.mappings.map(({ activeConnections, lastError, status, ...config }) => config)]),
 })
+/** 区分程序监听与宿主发布，不将保存成功误报为 LAN 可达。@param record 映射。@returns 发布提示。 */
+function publicationLabel(record: MappingRecord): string {
+  if (!record.enabled) return ''
+  if (record.listenHost !== '0.0.0.0') return '仅指定地址监听'
+  if (!props.portStatus?.supported) return '发布待核验'
+  if (!props.portStatus.actualPorts.includes(record.listenPort)) return '待应用发布'
+  return props.portStatus.rulesReady ? '已发布 · LAN 已就绪' : 'LAN 规则未就绪'
+}
+
 const statusLabels = { running: '运行中', stopped: '已停止', error: '异常' }
 // 删除或轮询导致总数缩小时，避免分页停在不存在的页。
 watch(() => filtered.value.length, total => { page.value = Math.min(page.value, Math.max(1, Math.ceil(total / 10))) })
@@ -35,6 +45,28 @@ watch(() => filtered.value.length, total => { page.value = Math.min(page.value, 
  * @returns 名称或不可用提示。
  */
 function proxyName(id: string): string { return props.proxies.find(proxy => proxy.id === id)?.name ?? '代理不可用' }
+
+/** 单次创建停用副本；不携带原 ID、监听状态、连接数或历史记录。
+ * @param record 原映射快照。
+ * @returns 复制完成后的 Promise。
+ */
+async function copyMapping(record: MappingRecord): Promise<void> {
+  if (busy.value[record.id]) return
+  busy.value[record.id] = 'copy'
+  operationError.value = ''
+  try {
+    const input = { ...mappingInput(record), name: mappingCopyName(record.name), enabled: false }
+    const validationError = validateMapping(input)
+    if (validationError) throw new Error(validationError)
+    await api.saveMapping(input)
+    ElMessage.success('映射已复制，副本未启用')
+    emit('changed')
+  } catch (failure) {
+    const message = errorMessage(failure)
+    operationError.value = `${record.name}：${message}`
+    ElMessage.error(message)
+  } finally { delete busy.value[record.id] }
+}
 
 /** 执行明确授权的单映射操作，不重启全局服务。
  * @param record 目标映射。
@@ -107,7 +139,7 @@ async function act(record: MappingRecord, action: 'toggle' | 'delete' | 'test'):
       </div>
       <el-table v-loading="loading" :data="rows" row-key="id" table-layout="fixed">
         <el-table-column prop="name" label="名称" min-width="115" sortable show-overflow-tooltip />
-        <el-table-column label="本地入口 → 目标" min-width="170"><template #default="{ row }"><div class="endpoint">{{ endpoint(row.listenHost, row.listenPort) }}</div><div class="endpoint muted">→ {{ endpoint(row.targetHost, row.targetPort) }}</div></template></el-table-column>
+        <el-table-column label="本地入口 → 目标" min-width="170"><template #default="{ row }"><div class="endpoint">{{ endpoint(row.listenHost, row.listenPort) }}</div><div class="endpoint muted">→ {{ endpoint(row.targetHost, row.targetPort) }}</div><div v-if="row.enabled" class="field-help">{{ publicationLabel(row) }}</div></template></el-table-column>
         <el-table-column label="代理" width="64" class-name="compact-column" show-overflow-tooltip><template #default="{ row }">{{ proxyName(row.proxyId) }}</template></el-table-column>
         <el-table-column label="状态" width="76" class-name="compact-column">
           <template #default="{ row }"><el-tooltip :content="safeMessage(row.lastError || '无错误')" :disabled="!row.lastError"><el-tag :type="row.status === 'running' ? 'success' : row.status === 'error' ? 'danger' : 'info'" effect="plain">{{ statusLabels[row.status as keyof typeof statusLabels] || '未知' }}</el-tag></el-tooltip></template>
@@ -119,15 +151,16 @@ async function act(record: MappingRecord, action: 'toggle' | 'delete' | 'test'):
           </template>
         </el-table-column>
         <el-table-column label="连接" width="74"><template #default="{ row }">{{ row.activeConnections }} / {{ row.maxConnections }}</template></el-table-column>
-        <el-table-column label="操作" width="190" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }"><div class="row-actions">
             <el-button link type="primary" :disabled="!!busy[row.id]" @click="editor?.open(row)">编辑</el-button>
+            <el-button link type="primary" :loading="busy[row.id] === 'copy'" :disabled="!!busy[row.id]" @click="copyMapping(row)">复制</el-button>
             <el-tooltip :content="testResults[row.id] || '手动测试目标连接'"><el-button link type="primary" :loading="busy[row.id] === 'test' || probing === row.id" :disabled="!!busy[row.id] || !!probing" @click="act(row, 'test')">测试</el-button></el-tooltip>
             <el-button link type="primary" :loading="busy[row.id] === 'toggle'" :disabled="!!busy[row.id]" @click="act(row, 'toggle')">{{ row.enabled ? '停用' : '启用' }}</el-button>
             <el-button link type="danger" :disabled="!!busy[row.id]" @click="act(row, 'delete')">删除</el-button>
           </div></template>
         </el-table-column>
-        <template #empty><el-empty :description="query || filter !== 'all' ? '没有符合条件的映射' : '暂无映射，创建后可手动启用'" :image-size="68" /></template>
+        <template #empty><el-empty :description="query || filter !== 'all' ? '没有符合条件的映射' : '暂无映射，新增后自动启用'" :image-size="68" /></template>
       </el-table>
       <div class="pagination"><el-pagination v-model:current-page="page" :page-size="10" :total="filtered.length" layout="total, prev, pager, next" /></div>
     </div>

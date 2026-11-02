@@ -51,6 +51,13 @@ func (store FileStore) Load() (Record, error) {
 
 // Save fsyncs a private temporary file and its parent after atomic rename.
 func (store FileStore) Save(record Record) error {
+	return savePrivateJSON(store.Path, record)
+}
+
+// savePrivateJSON atomically persists a separate versioned document without changing legacy JSON.
+// path must be root-private; value must contain no credentials. Errors stop host mutations.
+func savePrivateJSON(path string, value any) error {
+	store := FileStore{Path: path}
 	directory := filepath.Dir(store.Path)
 	if err := trustedPath(directory); err != nil {
 		return err
@@ -62,7 +69,7 @@ func (store FileStore) Save(record Record) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	data, err := json.Marshal(record)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}

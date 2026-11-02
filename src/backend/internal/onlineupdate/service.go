@@ -18,14 +18,16 @@ type ReleaseSource interface {
 
 // Service serializes asynchronous operations and persists their intent before execution.
 type Service struct {
-	mu     sync.Mutex
-	record Record
-	busy   bool
-	broken bool
-	store  Store
-	host   Host
-	source ReleaseSource
-	logger *log.Logger
+	mu        sync.Mutex
+	record    Record
+	busy      bool
+	broken    bool
+	store     Store
+	host      Host
+	source    ReleaseSource
+	logger    *log.Logger
+	portStore PortStore
+	ports     PortStatus
 }
 
 // NewService restores state; interrupted or unrecognized transactions require manual action.
@@ -94,7 +96,7 @@ func (service *Service) Status() Status {
 func (service *Service) persistLocked() error {
 	status := &service.record.Status
 	status.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	status.CanApply = !service.busy && !service.broken && status.State != "manual_recovery" && status.Latest != nil && newer(status.Latest.Version, status.CurrentVersion)
+	status.CanApply = !service.busy && !service.broken && service.ports.State != "manual_recovery" && status.State != "manual_recovery" && status.Latest != nil && newer(status.Latest.Version, status.CurrentVersion)
 	if err := service.store.Save(service.record); err != nil {
 		service.broken = true
 		service.busy = false
@@ -118,7 +120,7 @@ func (service *Service) log(message string) {
 
 // beginLocked reserves an operation and durably records its intent before launching work.
 func (service *Service) beginLocked(state, phase, message string) error {
-	if service.busy || service.broken {
+	if service.busy || service.broken || service.ports.State == "manual_recovery" && phase != "rollback" {
 		return errors.New("已有操作正在执行或需要宿主恢复")
 	}
 	var identifier [16]byte
@@ -380,6 +382,26 @@ func (service *Service) markRolledBack() {
 		service.mu.Unlock()
 		service.finish("manual_recovery", "version", "回退标记已保存，但无法确认受管容器正在运行；请宿主人工检查")
 		return
+	}
+	if service.portStore != nil {
+		portHost := service.host.(PortHost)
+		portCtx, portCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		actual, ready, portErr := portHost.InspectPorts(portCtx)
+		portCancel()
+		if portErr != nil {
+			service.ports.State = "manual_recovery"
+			service.ports.Message = "回退容器端口无法核验"
+		} else {
+			service.ports.State = "idle"
+			service.ports.AppliedPorts = actual
+			service.ports.ActualPorts = actual
+			service.ports.RulesReady = ready
+			service.ports.Revision = portRevision(actual, service.record.Status.OperationID)
+		}
+		if service.savePortsLocked() != nil {
+			service.mu.Unlock()
+			return
+		}
 	}
 	service.record.Status.CanRollback = false
 	service.mu.Unlock()

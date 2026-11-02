@@ -163,6 +163,9 @@ func (app *App) handleOnlineUpdates(writer http.ResponseWriter, request *http.Re
 			return
 		}
 	}
+	// Serialize acceptance with mapping commits; the host persists its busy state before 202.
+	app.mu.Lock()
+	defer app.mu.Unlock()
 	app.onlineUpdates.forward(writer, request, action, body)
 }
 

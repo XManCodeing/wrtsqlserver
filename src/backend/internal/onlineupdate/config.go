@@ -173,7 +173,7 @@ func LoadConfig(path string) (Config, error) {
 
 // validateDeployment checks the trusted directory and all directly executed/sourced helpers.
 func validateDeployment(directory string) error {
-	for _, name := range []string{"", "common.sh", "relay-update.sh", "updater-preflight.sh", "updater-start.sh", "relay-updater", "deploy-stat"} {
+	for _, name := range []string{"", "common.sh", "relay-update.sh", "updater-preflight.sh", "updater-start.sh", "ports-common.sh", "lan-rules.sh", "legacy-lan-validate.awk", "lan-manage.sh", "lan-restore.sh", "updater-service.sh", "relay-updater", "deploy-stat"} {
 		if name == "deploy-stat" {
 			if _, err := os.Lstat(filepath.Join(directory, name)); os.IsNotExist(err) && systemStatAvailable() {
 				continue

@@ -15,11 +15,11 @@ const cidrText = ref('127.0.0.1/32')
 const draft = reactive<MappingInput>(defaults())
 
 /** 生成保守的新建配置，不填充实际目标。
- * @returns 默认禁用的映射草稿。
+ * @returns 默认启用的映射草稿。
  */
 function defaults(): MappingInput {
   return { name: '', listenHost: '127.0.0.1', listenPort: 3306, targetHost: '', targetPort: 3306,
-    proxyId: '', enabled: false, maxConnections: 32, allowedCIDRs: ['127.0.0.1/32'] }
+    proxyId: '', enabled: true, maxConnections: 32, allowedCIDRs: ['127.0.0.1/32'] }
 }
 
 /** 创建独立编辑快照，后续轮询不修改它。
@@ -40,7 +40,7 @@ function open(record?: MappingRecord): void {
 async function save(): Promise<void> {
   if (saving.value) return
   const input: MappingInput = {
-    ...draft, enabled: editId.value ? draft.enabled : false,
+    ...draft, enabled: editId.value ? draft.enabled : true,
     name: draft.name.trim(), listenHost: draft.listenHost.trim(), targetHost: draft.targetHost.trim(),
     allowedCIDRs: cidrText.value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean),
   }
@@ -65,7 +65,7 @@ async function save(): Promise<void> {
       return
     }
     visible.value = false
-    ElMessage.success(editId.value ? '映射已保存' : '映射已创建，当前未启用')
+    ElMessage.success(editId.value ? '映射已保存' : '映射已创建并启用')
   } catch (failure) { error.value = errorMessage(failure) }
   finally { saving.value = false }
 }
@@ -82,7 +82,7 @@ defineExpose({ open })
         <el-form-item label="监听地址" required><el-input v-model="draft.listenHost" placeholder="本机监听 IP" /></el-form-item>
         <el-form-item label="监听端口" required><el-input-number v-model="draft.listenPort" :min="1" :max="65535" controls-position="right" /></el-form-item>
       </div>
-      <p class="field-help compact-help">Docker bridge 模式需监听 0.0.0.0，且预先配置容器发布端口；不能绑定宿主机 LAN IP。</p>
+      <p class="field-help compact-help">Docker bridge 模式需监听 0.0.0.0；未发布端口将在上方显示待应用，确认应用后才可从 LAN 访问。不能绑定宿主机 LAN IP。</p>
       <el-alert v-if="draft.listenHost.trim() === '0.0.0.0'" title="将监听所有 IPv4 接口，请仅允许可信来源网段。" type="warning" :closable="false" show-icon class="setup-alert" />
       <div class="form-grid host-port">
         <el-form-item label="目标主机" required><el-input v-model="draft.targetHost" placeholder="由 SOCKS5 代理访问的主机名或 IP" /></el-form-item>
@@ -100,7 +100,7 @@ defineExpose({ open })
         <el-input v-model="cidrText" type="textarea" :rows="3" placeholder="每行一条 IPv4 CIDR，最多 64 条，不允许 /0" />
         <span class="field-help">填写实际允许访问的网段；127.0.0.1/32 只允许本机。</span>
       </el-form-item>
-      <div class="muted">{{ draft.enabled ? '当前已启用，保存会重新应用配置。' : '当前未启用，保存后可从列表手动启用。' }}</div>
+      <div class="muted">{{ !editId ? '创建后自动启用，请确认监听地址和允许来源。' : draft.enabled ? '当前已启用，保存会重新应用配置。' : '当前未启用，保存后可从列表手动启用。' }}</div>
     </el-form>
     <template #footer>
       <el-button :disabled="saving" @click="visible = false">取消</el-button>

@@ -1,4 +1,13 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
+import brandSvg from '../assets/brand.svg?raw'
+
+/** 使用现有主色同步标签图标，主题仍仅由全局入口控制。@returns 无。 */
+function syncFavicon(): void {
+  const link = document.querySelector<HTMLLinkElement>('#app-favicon')
+  const color = getComputedStyle(document.documentElement).getPropertyValue('--app-primary').trim()
+  if (!link || !color) return
+  link.href = `data:image/svg+xml,${encodeURIComponent(brandSvg.replace('fill="currentColor"', `fill="${color}"`))}`
+}
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 const storageKey = 'port-console-theme'
@@ -20,6 +29,7 @@ export function useTheme() {
    */
   function apply(): void {
     document.documentElement.classList.toggle('dark', mode.value === 'dark' || (mode.value === 'system' && media.matches))
+    syncFavicon()
   }
   watch(mode, () => {
     apply()

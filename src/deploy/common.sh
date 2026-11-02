@@ -188,6 +188,9 @@ relay_run() {
     elif [ "${REQUIRE_ONLINE_UPDATE:-no}" = yes ]; then
         fail 'existing online update capability requires a safe updater socket'
     fi
+    for relay_port in $(printf '%s' "${RELAY_PORTS-13306}" | tr ',' ' '); do
+        set -- "$@" -p "$LAN_BIND_IP:$relay_port:$relay_port/tcp"
+    done
     docker_local run -d --pull never --name "$NAME" \
       --label "$LABEL=relay-v1" --label "io.db-relay.deploy.transaction=${TRANSACTION:-initial}" \
       --restart no --user 10001:10001 --read-only --cap-drop ALL \
@@ -199,7 +202,7 @@ relay_run() {
       -e LISTEN_ADDR=0.0.0.0:8080 -e APP_DATA_DIR=/data -e WEB_DIR=/app/web \
       -e ADMIN_PASSWORD_FILE=/run/secrets/admin_password -e MAX_CONNECTIONS=128 \
       -e "REDIS_ADDR=$LAN_BIND_IP:6379" \
-      -p "$LAN_BIND_IP:18080:8080/tcp" -p "$LAN_BIND_IP:13306:13306/tcp" \
+      -p "$LAN_BIND_IP:18080:8080/tcp" \
       --health-cmd 'wget -q -T 3 -O - http://127.0.0.1:8080/api/session | grep -q '\''"authenticated":false'\''' \
       --health-interval 5s --health-timeout 4s --health-retries 6 "$@" "$relay_image" >/dev/null
 }

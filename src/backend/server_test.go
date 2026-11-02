@@ -159,6 +159,8 @@ func TestInputBoundaries(t *testing.T) {
 			t.Fatalf("case %d accepted", index)
 		}
 	}
+	// Listener collisions apply only when both records are enabled.
+	base.Enabled = true
 	existing := base
 	existing.ID = "other"
 	existing.ListenHost = "0.0.0.0"

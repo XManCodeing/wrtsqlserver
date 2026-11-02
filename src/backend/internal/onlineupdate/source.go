@@ -95,7 +95,7 @@ func (service *Service) SaveSource(source Source) (Source, error) {
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	if service.busy || service.broken || service.record.Status.State == "manual_recovery" {
+	if service.busy || service.broken || service.record.Status.State == "manual_recovery" || service.ports.State == "manual_recovery" {
 		return Source{}, errors.New("操作执行中或需要人工恢复，不能修改更新来源")
 	}
 	candidate := service.record

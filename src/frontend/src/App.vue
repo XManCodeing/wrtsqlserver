@@ -3,9 +3,11 @@ import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Connection, DataLine, Monitor, Coin } from '@element-plus/icons-vue'
 import { api, errorMessage, setCsrfToken } from './api'
+import type { PortsStatus } from './composables/portsState'
 import { useTheme } from './composables/useTheme'
 import { useDashboard } from './composables/useDashboard'
 import LoginPanel from './components/LoginPanel.vue'
+import PortsPanel from './components/PortsPanel.vue'
 import MappingsPage from './components/MappingsPage.vue'
 import ProxiesPage from './components/ProxiesPage.vue'
 import OverviewPage from './components/OverviewPage.vue'
@@ -20,7 +22,15 @@ const checking = ref(true)
 const sessionError = ref('')
 const loggingOut = ref(false)
 const page = ref<'overview' | 'mappings' | 'proxies' | 'redis'>('overview')
+const portStatus = ref<PortsStatus | null>(null)
 const proxyRevision = ref(0)
+const mappingRevision = ref(0)
+
+/** 映射写入立即失效端口快照，并刷新现有运行状态。@returns 无。 */
+function mappingsChanged(): void {
+  mappingRevision.value += 1
+  void dashboard.refresh()
+}
 const proxiesPage = ref<InstanceType<typeof ProxiesPage>>()
 
 /** 代理写入后失效近期探测（包括密码变化）。@returns 无。 */
@@ -129,7 +139,8 @@ onUnmounted(() => window.removeEventListener('session-expired', expireSession))
           <template #title>{{ error }}</template><span>当前展示最近一次成功快照。</span><el-button link type="primary" :disabled="loading" @click="dashboard.refresh(true)">重新加载</el-button>
         </el-alert>
         <OverviewPage v-show="page === 'overview'" :status="status" :mappings="mappings" :proxy-count="proxies.length" :loading="loading" @navigate="page = $event" />
-        <MappingsPage v-show="page === 'mappings'" :active="page === 'mappings'" :proxy-revision="proxyRevision" :mappings="mappings" :proxies="proxies" :loading="loading" @changed="dashboard.refresh()" @create-proxy="createProxy" />
+        <PortsPanel v-show="page === 'mappings'" :active="page === 'mappings'" :revision="mappingRevision" @status="portStatus = $event" />
+        <MappingsPage v-show="page === 'mappings'" :active="page === 'mappings'" :proxy-revision="proxyRevision" :port-status="portStatus" :mappings="mappings" :proxies="proxies" :loading="loading" @changed="mappingsChanged" @create-proxy="createProxy" />
         <ProxiesPage v-show="page === 'proxies'" ref="proxiesPage" :mappings="mappings" :proxies="proxies" :loading="loading" @changed="proxiesChanged" />
         <RedisPage v-show="page === 'redis'" :active="page === 'redis'" />
       </main>

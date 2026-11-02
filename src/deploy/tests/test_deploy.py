@@ -33,6 +33,8 @@ if args[:2] == ['image', 'inspect']:
     if os.environ.get('MISSING_IMAGE'): sys.exit(1)
     output(os.environ.get('MOCK_ARCH', 'linux/amd64') + ' ' + os.environ.get('MOCK_IMAGE', 'sha256:candidate'))
 if args[:2] == ['container', 'ls']:
+    if '--filter' not in args:
+        output('')
     if os.environ.get('LIST_FAIL'): sys.exit(1)
     name = args[args.index('--filter')+1][7:-1]
     output(state.get(name, {}).get('id', ''))
@@ -55,6 +57,8 @@ if args[0] == 'inspect':
         output(container.get('mounts', mounts))
     if '.HostConfig.PortBindings' in fmt:
         output(container.get('ports', '192.168.10.1:13306:13306/tcp;192.168.10.1:18080:8080/tcp;'))
+    if '.HostConfig.Privileged' in fmt:
+        output(container.get('security', 'false|true|default|500000000|134217728|134217728|64|["ALL"]|["no-new-privileges:true"]|[]||null'))
     if '.Config.User' in fmt: output(container.get('user', '10001:10001 no'))
     if fmt == '{{.State.Status}}': output(container.get('status', 'running' if container['running'] else 'exited'))
     if fmt == '{{.State.Running}}': output(str(container['running']).lower())
@@ -81,7 +85,8 @@ if args[0] == 'run':
     assert name not in state
     transaction = next((arg.split('=', 1)[1] for arg in args if arg.startswith('io.db-relay.deploy.transaction=')), 'initial')
     state[name] = {'id': os.environ.get('MOCK_ID', 'b'*64), 'running': True, 'transaction': transaction,
-                   'image': os.environ.get('MOCK_IMAGE', 'sha256:candidate'),
+                   'image': args[-1],
+                   'ports': ''.join(value + ';' for index, value in enumerate(args) if index > 0 and args[index-1] == '-p'),
                    'online': 'ONLINE_UPDATE_SOCKET=/run/relay-updater/control.sock' in args}
     save()
     if name == 'db-relay' and transaction != 'initial':

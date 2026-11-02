@@ -20,6 +20,9 @@ func (service *Service) Handler() http.Handler {
 			respondError(writer, http.StatusBadRequest, "不支持查询参数")
 			return
 		}
+		if service.handlePorts(writer, request) {
+			return
+		}
 		if request.Method == http.MethodGet && request.URL.Path == "/status" {
 			writeJSON(writer, http.StatusOK, service.Status())
 			return

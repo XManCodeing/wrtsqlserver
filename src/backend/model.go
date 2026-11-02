@@ -149,7 +149,8 @@ func validateMapping(mapping Mapping, cfg Config, apiAddr string) error {
 		return errors.New("proxyId does not exist")
 	}
 	for _, existing := range cfg.Mappings {
-		if existing.ID != mapping.ID && existing.ListenPort == mapping.ListenPort &&
+		// Disabled copies retain their endpoint without reserving it; all safety checks above still apply.
+		if mapping.Enabled && existing.Enabled && existing.ID != mapping.ID && existing.ListenPort == mapping.ListenPort &&
 			(existing.ListenHost == mapping.ListenHost || existing.ListenHost == "0.0.0.0" || mapping.ListenHost == "0.0.0.0") {
 			return errors.New("mapping listener conflicts with another mapping")
 		}

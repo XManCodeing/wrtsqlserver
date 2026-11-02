@@ -121,6 +121,9 @@ func (app *App) reconcile(previous Config) {
 
 // commit durably saves a candidate before changing in-memory configuration or running listeners.
 func (app *App) commit(candidate Config) error {
+	if err := app.hostMutationAllowed(); err != nil {
+		return err
+	}
 	if err := app.store.Save(candidate); err != nil {
 		log.Printf("configuration persistence failed")
 		return errors.New("configuration could not be saved")
@@ -235,6 +238,10 @@ func (app *App) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		app.auth.mu.Unlock()
 		setSessionCookie(writer, request, "", -1)
 		writeJSON(writer, 200, map[string]bool{"ok": true})
+		return
+	}
+	if path == "/api/ports" || strings.HasPrefix(path, "/api/ports/") {
+		app.handlePorts(writer, request)
 		return
 	}
 	if path == "/api/online-updates" || strings.HasPrefix(path, "/api/online-updates/") {

@@ -1,3 +1,4 @@
+import type { PortsApplyInput, PortsStatus } from './composables/portsState'
 import type { OnlineUpdateSource } from './composables/onlineSourceState'
 import type { OnlineUpdateStatus } from './composables/onlineUpdateState'
 import type { ConnectivityHistory, MappingInput, MappingRecord, ProxyInput, ProxyRecord, ServiceStatus, Session, TestResult, UpdatePackage, UpdateStatus, RedisStatus, RedisKeys, RedisValue } from './types'
@@ -67,6 +68,10 @@ async function request<Result>(path: string, method = 'GET', body?: unknown, tim
     if (method !== 'GET') console.info('[api] 写入完成', { method, status: response.status })
     return payload as Result
   } catch (error) {
+    const portsMutation = method === 'POST' && path === '/ports/apply'
+    if (portsMutation && (error instanceof TypeError || (error instanceof DOMException && error.name === 'AbortError'))) {
+      throw new Error('端口应用请求连接中断或超时，执行结果尚未确认。请等待服务恢复后刷新状态，不要重复提交；可能需要重新登录。')
+    }
     const onlineMutation = method === 'POST' && path.startsWith('/online-updates/')
     if (onlineMutation && (error instanceof TypeError || (error instanceof DOMException && error.name === 'AbortError'))) {
       throw new Error('更新请求连接中断或超时，执行结果尚未确认。请等待服务恢复后刷新状态，不要重复提交；可能需要重新登录。')
@@ -93,6 +98,13 @@ export function errorMessage(error: unknown): string {
 }
 
 export const api = {
+  /** 查询宿主期望、发布与 LAN 例外状态。@returns 端口状态快照。 */
+  ports: () => request<PortsStatus>('/ports'),
+  /** 明确确认后请求宿主应用其计算的端口集合。@param input 版本与确认信息。@returns 后台接受结果。 */
+  applyPorts: (input: PortsApplyInput) => request<unknown>('/ports/apply', 'POST', {
+    revision: input.revision, configRevision: input.configRevision,
+    confirmation: input.confirmation, finalizePrevious: input.finalizePrevious,
+  }),
   /** 读取宿主保存的更新来源，不以网页默认值覆盖。@returns 当前来源。 */
   onlineUpdateSource: () => request<OnlineUpdateSource>('/online-updates/source'),
   /** 保存公开来源标识，凭据继续由宿主配置。@param source 已校验来源。@returns 持久化来源。 */

@@ -47,6 +47,9 @@ func run(configPath string, logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
+	if err = service.ConfigurePorts(onlineupdate.PortFileStore{Path: onlineupdate.Root + "/ports-v1.json"}); err != nil {
+		return err
+	}
 	server := &http.Server{Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

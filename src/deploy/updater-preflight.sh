@@ -47,7 +47,7 @@ for required in wget cmp df date mkdir chmod chown cp mv rm rmdir sync cat id di
     command -v "$required" >/dev/null || fail "missing command: $required"
 done
 trusted_deploy_path "$HERE" directory
-for deployed_file in common.sh relay-update.sh updater-preflight.sh updater-start.sh; do
+for deployed_file in common.sh relay-update.sh updater-preflight.sh updater-start.sh ports-common.sh lan-rules.sh legacy-lan-validate.awk lan-manage.sh lan-restore.sh updater-service.sh; do
     trusted_deploy_path "$HERE/$deployed_file" file
 done
 if ! command -v stat >/dev/null 2>&1; then

@@ -1,5 +1,6 @@
 # Local environment handoff contains machine-specific details; never publish.
 /OpenWrt环境基础与Docker部署交接.md
+/doc/OpenWrt环境基础与Docker部署交接.md
 
 src/frontend/node_modules/
 src/frontend/dist/

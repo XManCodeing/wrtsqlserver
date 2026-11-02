@@ -1,6 +1,7 @@
 #!/bin/sh
-# Manual only, Docker 20.10 / BusyBox sh. Never interacts with Redis, firewall,
-# dockerd service, images pull/prune, archives or arbitrary package extraction.
+# Manual only, Docker 20.10 / BusyBox sh. Never interacts with Redis,
+# dockerd service, image pull/prune or arbitrary package extraction. Explicit port
+# operations reconcile only project-owned mangle PREROUTING LAN RETURN rules.
 # LAN_INTERFACE=br-lan LAN_BIND_IP=<LAN IPv4> LAN_INTERFACE_CONFIRMED=yes \
 # RELAY_IMAGE=local/db-relay:1.0.1 sh relay-update.sh [check|apply|rollback|finalize]
 # check is read-only. apply accepts only locally imported linux/amd64 images.
@@ -15,9 +16,11 @@
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$HERE/common.sh"
+. "$HERE/ports-common.sh"
+. "$HERE/lan-rules.sh"
 MODE=${1:-check}
-[ "$#" -le 1 ] || fail 'usage: relay-update.sh [check|apply|rollback|finalize]'
-case "$MODE" in check|apply|rollback|finalize) ;; *) fail 'usage: relay-update.sh [check|apply|rollback|finalize]';; esac
+[ "$#" -le 1 ] || fail 'one operation argument required'
+case "$MODE" in check|apply|rollback|finalize|ports-status|ports-rules|ports-check|ports-apply) ;; *) fail 'unsupported relay operation';; esac
 TX=$RELAY/transaction
 FAILED=db-relay-failed
 TRANSACTION=upgrade-v1
@@ -54,6 +57,10 @@ original_id() {
 validate_original() {
     managed "$1"
     [ "$(docker_local inspect --format '{{.Id}}' "$1")" = "$ORIGINAL" ] || fail 'original container identity mismatch'
+    if [ -e "$TX/original-image" ]; then
+        private_file "$TX/original-image" 0
+        [ "$(docker_local inspect --format '{{.Image}}' "$1")" = "$(cat "$TX/original-image")" ] || fail 'original image identity mismatch'
+    fi
 }
 # check_layout(name): accept only original binds or the exact readonly socket bind.
 # Validates bind writability, LAN ports, user and online environment; returns 0.
@@ -79,8 +86,13 @@ check_layout() {
         *) fail 'unsupported bind layout';;
     esac
     ports=$(docker_local inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{range $bindings}}{{.HostIp}}:{{.HostPort}}:{{$port}};{{end}}{{end}}' "$layout_name")
-    [ "$ports" = "$LAN_BIND_IP:13306:13306/tcp;$LAN_BIND_IP:18080:8080/tcp;" ] || fail 'LAN/ports differ from managed deployment'
+    ports_layout "$layout_name"
     [ "$(docker_local inspect --format '{{.Config.User}} {{.HostConfig.RestartPolicy.Name}}' "$layout_name")" = '10001:10001 no' ] || fail 'unsupported user/restart policy'
+    security_profile=$(docker_local inspect --format '{{.HostConfig.Privileged}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.PidsLimit}}|{{json .HostConfig.CapDrop}}|{{json .HostConfig.SecurityOpt}}|{{json .HostConfig.Devices}}|{{.HostConfig.PidMode}}|{{json .HostConfig.CapAdd}}' "$layout_name")
+    case "$security_profile" in
+        'false|true|default|500000000|134217728|134217728|64|["ALL"]|["no-new-privileges:true"]|[]||null'|'false|true|default|500000000|134217728|134217728|64|["ALL"]|["no-new-privileges:true"]|[]||[]') ;;
+        *) fail 'unsupported container security/resource/network layout';;
+    esac
 }
 # full_id(name): print a validated full Docker ID; reject short/ambiguous responses.
 full_id() {
@@ -110,7 +122,9 @@ finalize_journal() {
     for journal_entry in "$TX"/* "$TX"/.[!.]* "$TX"/..?*; do
         [ -e "$journal_entry" ] || [ -L "$journal_entry" ] || continue
         case "${journal_entry##*/}" in
-            original-id|candidate-id) private_file "$journal_entry" 0;;
+            original-id|candidate-id|original-image|lan-mangle-before) private_file "$journal_entry" 0;;
+            ports-original|ports-candidate) ports_read "$journal_entry" >/dev/null;;
+            lan-managed) private_file "$journal_entry" 0; [ "$(cat "$journal_entry")" = yes ] || fail 'invalid LAN journal';;
             backup)
                 private_dir "$journal_entry" 0
                 private_file "$journal_entry/config.enc" 0
@@ -182,6 +196,7 @@ finalize_update() {
     fi
     validate_data "$RELAY/data"
     relay_health || fail 'active relay must be healthy before finalize'
+    if [ -e "$TX/lan-managed" ]; then lan_rules_check "$(ports_current)"; fi
     if [ -n "$cleanup_name" ]; then
         cleanup_id=$(full_id "$cleanup_name")
         [ "$(docker_local inspect --format '{{.State.Status}}' "$cleanup_id")" = exited ] || fail 'cleanup container must be exited'
@@ -264,10 +279,12 @@ recover() {
     active_id=$(container_id "$NAME")
     if [ -n "$old_id" ]; then
         validate_original "$OLD"
+        check_layout "$OLD"
         if [ -n "$active_id" ]; then
             managed "$NAME"
             [ "$(docker_local inspect --format '{{index .Config.Labels "io.db-relay.deploy.transaction"}}' "$NAME")" = "$TRANSACTION" ] || fail 'candidate transaction mismatch'
             save_candidate
+            check_layout "$NAME"
             require_absent "$FAILED"
             # Candidate may be unhealthy/crashed; stopping must succeed, but its
             # exit code is not trusted as a migration success signal.
@@ -281,6 +298,7 @@ recover() {
     else
         [ -n "$active_id" ] || fail 'original container unavailable'
         validate_original "$NAME"
+        check_layout "$NAME"
         # No candidate can have run until original was renamed. If restore began
         # and rename already completed, validate restored files before restart.
         if [ -e "$TX/restore-intent" ]; then
@@ -288,6 +306,7 @@ recover() {
             validate_data "$RELAY/data"
         fi
     fi
+    ports_restore
     log 'restarting original relay only'
     docker_local start "$NAME" >/dev/null
     relay_health || fail 'original relay health failed; retained journal requires review'
@@ -315,11 +334,18 @@ finish() {
 }
 # apply_update(): journal before any stop; snapshot while stopped; retain original.
 apply_update() {
+    [ ! -e "$TX" ] || fail 'unexpected transaction path'
     new_dir "$TX" 0
     docker_local inspect --format '{{.Id}}' "$NAME" > "$TX/original-id"
+    docker_local inspect --format '{{.Image}}' "$NAME" > "$TX/original-image"
     sync
     ORIGINAL=$(original_id)
+    if [ "$MODE" = ports-apply ]; then
+        [ "$(cat "$TX/original-image")" = "$IMAGE_ID" ] || fail 'same-image port rebuild identity changed'
+    fi
     TRANSACTION=$ORIGINAL
+    # Snapshot policies for upgrades too, so future image updates preserve dynamic ports.
+    if [ -d "$PORT_HOME" ]; then ports_snapshot; fi
     RECOVER_ON_EXIT=yes
     mark stopping
     log 'stopping relay for consistent config/key backup; Redis unaffected'
@@ -330,7 +356,17 @@ apply_update() {
     mark launching
     relay_run "$IMAGE_ID"
     save_candidate
+    if [ -e "$TX/ports-original" ]; then ports_commit; fi
     relay_health || fail 'candidate health failed'
+    if [ "$MODE" = ports-apply ]; then
+        safe_path "$PORT_HOME/ports-migrated"
+        if [ -e "$PORT_HOME/ports-migrated" ]; then
+            private_file "$PORT_HOME/ports-migrated" 0
+        else
+            (set -C; printf 'yes\n' > "$PORT_HOME/ports-migrated")
+        fi
+        sync
+    fi
     mark applied
     RECOVER_ON_EXIT=no
     log 'update healthy; stopped rollback container and consistent snapshot retained'
@@ -343,6 +379,25 @@ command -v cmp >/dev/null || fail 'cmp required'
 private_dir "$RELAY" 0
 private_file "$RELAY/admin_password" 10001
 safe_path "$TX"
+if [ "$MODE" = ports-status ] || [ "$MODE" = ports-rules ]; then
+    check_layout
+    if [ "$MODE" = ports-rules ]; then
+        private_file "$PORT_HOME/lan-owned" 0
+        if [ -d "$PORT_HOME/lan-migration" ]; then
+            private_file "$PORT_HOME/lan-migration/state" 0
+            [ "$(cat "$PORT_HOME/lan-migration/state")" = complete ] || fail 'LAN migration manual_recovery'
+        fi
+        lan_rules_check "${RELAY_PORTS-}"
+    fi
+    exit 0
+fi
+if [ "$MODE" = ports-check ] && [ -d "$TX" ]; then
+    [ -e "$TX/applied" ] || [ -e "$TX/rolled-back" ] || fail 'unfinished transaction blocks port preflight'
+    finalize_journal
+    check_layout
+    ports_preflight
+    exit 0
+fi
 if [ "$MODE" = rollback ] || [ "$MODE" = finalize ]; then
     private_dir "$TX" 0
     acquire_lock "$RELAY"
@@ -359,10 +414,17 @@ check_layout
 require_absent "$OLD"
 require_absent "$FAILED"
 validate_data "$RELAY/data"
-image_check "${RELAY_IMAGE:-}"
-[ "$IMAGE_ID" != "$(docker_local inspect --format '{{.Image}}' "$NAME")" ] || fail 'candidate image equals current image'
+if [ "$MODE" = ports-check ] || [ "$MODE" = ports-apply ]; then
+    ports_preflight
+    IMAGE_ID=$(docker_local inspect --format '{{.Image}}' "$NAME")
+    case "$IMAGE_ID" in sha256:*) ;; *) fail 'invalid current image identity';; esac
+else
+    RELAY_PORTS=$(ports_current)
+    image_check "${RELAY_IMAGE:-}"
+    [ "$IMAGE_ID" != "$(docker_local inspect --format '{{.Image}}' "$NAME")" ] || fail 'candidate image equals current image'
+fi
 log 'update preflight passed; check made no writes; apply temporarily stops relay'
-[ "$MODE" = apply ] || exit 0
+[ "$MODE" = apply ] || [ "$MODE" = ports-apply ] || exit 0
 acquire_lock "$RELAY"
 trap finish EXIT
 trap 'exit 130' INT
@@ -371,6 +433,7 @@ trap 'exit 143' HUP TERM
 # hostile root or concurrent external Docker administrators/unmounts.
 [ ! -e "$TX" ] || fail 'transaction appeared while locking'
 check_layout
+if [ "$MODE" = ports-apply ]; then ports_preflight; fi
 require_absent "$OLD"
 require_absent "$FAILED"
 apply_update

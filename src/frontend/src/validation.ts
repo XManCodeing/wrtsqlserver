@@ -102,6 +102,24 @@ export function mappingInput(record: MappingRecord): MappingInput {
   return { name, listenHost, listenPort, targetHost, targetPort, proxyId, enabled, maxConnections, allowedCIDRs: [...allowedCIDRs] }
 }
 
+/** 为副本保留完整码点的名称前缀，追加固定后缀且不超过后端字节上限。
+ * @param name 原映射名称。
+ * @returns 最多 100 UTF-8 字节的副本名称。
+ */
+export function mappingCopyName(name: string): string {
+  const suffix = ' copy'
+  const budget = 100 - byteLength(suffix)
+  let prefix = ''
+  let used = 0
+  for (const character of name) {
+    const size = byteLength(character)
+    if (used + size > budget) break
+    prefix += character
+    used += size
+  }
+  return prefix + suffix
+}
+
 /** 格式化主机端口，兼容 IPv6。
  * @param host 主机地址。
  * @param port 端口。
