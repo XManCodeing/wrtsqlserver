@@ -20,27 +20,28 @@ var version = "1.0.0"
 
 // App serializes durable mutations while runtimes independently handle network traffic.
 type App struct {
-	mu           sync.Mutex
-	cfg          Config
-	store        *Store
-	auth         *Auth
-	apiAddr      string
-	webDir       string
-	started      time.Time
-	runtimes     map[string]*Runtime
-	slots        chan struct{}
-	active       atomic.Int64
-	testSlots    chan struct{}
-	testRate     rateBucket
-	histories    map[string][]ConnectivityPoint
-	probeCtx     context.Context
-	probeCancel  context.CancelFunc
-	probeWait    sync.WaitGroup
-	probeJobs    chan *Runtime
-	probePending map[*Runtime]bool
-	closed       bool
-	updates      *updateManager
-	redis        *redisMonitor
+	mu            sync.Mutex
+	cfg           Config
+	store         *Store
+	auth          *Auth
+	apiAddr       string
+	webDir        string
+	started       time.Time
+	runtimes      map[string]*Runtime
+	slots         chan struct{}
+	active        atomic.Int64
+	testSlots     chan struct{}
+	testRate      rateBucket
+	histories     map[string][]ConnectivityPoint
+	probeCtx      context.Context
+	probeCancel   context.CancelFunc
+	probeWait     sync.WaitGroup
+	probeJobs     chan *Runtime
+	probePending  map[*Runtime]bool
+	closed        bool
+	updates       *updateManager
+	onlineUpdates *onlineUpdateProxy
+	redis         *redisMonitor
 }
 
 // newApp loads and validates durable configuration before starting any mapping listener.
@@ -78,6 +79,7 @@ func newApp(store *Store, password, apiAddr, webDir string, maxConnections int) 
 	app := &App{cfg: cfg, store: store, auth: newAuth(password), apiAddr: apiAddr, webDir: webDir, started: time.Now(), runtimes: map[string]*Runtime{}, slots: make(chan struct{}, maxConnections), testSlots: make(chan struct{}, 4)}
 	app.redis = newRedisMonitor(os.Getenv("REDIS_ADDR"))
 	app.updates = newUpdateManager(os.Getenv("UPDATE_PUBLIC_KEY_FILE"), os.Getenv("UPDATE_STAGING_DIR"))
+	app.onlineUpdates = newOnlineUpdateProxy(os.Getenv("ONLINE_UPDATE_SOCKET"))
 	app.reconcile(Config{Proxies: []Proxy{}, Mappings: []Mapping{}})
 	app.startConnectivity()
 	return app, nil
@@ -233,6 +235,10 @@ func (app *App) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		app.auth.mu.Unlock()
 		setSessionCookie(writer, request, "", -1)
 		writeJSON(writer, 200, map[string]bool{"ok": true})
+		return
+	}
+	if path == "/api/online-updates" || strings.HasPrefix(path, "/api/online-updates/") {
+		app.handleOnlineUpdates(writer, request)
 		return
 	}
 	if path == "/api/updates" || strings.HasPrefix(path, "/api/updates/") {

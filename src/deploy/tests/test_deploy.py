@@ -31,31 +31,45 @@ def output(value):
     sys.exit(0)
 if args[:2] == ['image', 'inspect']:
     if os.environ.get('MISSING_IMAGE'): sys.exit(1)
-    output(os.environ.get('MOCK_ARCH', 'linux/amd64') + ' sha256:candidate')
+    output(os.environ.get('MOCK_ARCH', 'linux/amd64') + ' ' + os.environ.get('MOCK_IMAGE', 'sha256:candidate'))
 if args[:2] == ['container', 'ls']:
     if os.environ.get('LIST_FAIL'): sys.exit(1)
     name = args[args.index('--filter')+1][7:-1]
     output(state.get(name, {}).get('id', ''))
 if args[0] == 'inspect':
-    container = state.get(args[-1])
+    container = state.get(args[-1]) or next((item for item in state.values() if item['id'] == args[-1]), None)
     if not container: sys.exit(1)
     fmt = args[args.index('--format')+1]
     if fmt == '{{.Id}}': output(container['id'])
     if fmt == '{{.Image}}': output(container.get('image', 'sha256:old'))
     if 'deploy.managed' in fmt: output(container.get('label', 'relay-v1'))
     if 'deploy.transaction' in fmt: output(container.get('transaction', 'initial'))
+    if '.Config.Env' in fmt:
+        output(container.get('online_env', 'ONLINE_UPDATE_SOCKET=/run/relay-updater/control.sock' if container.get('online') else ''))
     if '.Mounts' in fmt:
+        if 'ne .Type' in fmt: output(container.get('extra_mounts', 'tmpfs:/tmp;'))
+        if '.RW' in fmt: output(container.get('bind_modes', 'true;false;false;' if container.get('online') else 'true;false;'))
         root = os.environ['MOCK_ROOT'] + '/db-relay'
-        output(root+'/data:/data;'+root+'/admin_password:/run/secrets/admin_password;')
+        mounts = root+'/data:/data;'+root+'/admin_password:/run/secrets/admin_password;'
+        if container.get('online'): mounts += os.environ['MOCK_ROOT']+'/relay-updater/run:/run/relay-updater;'
+        output(container.get('mounts', mounts))
     if '.HostConfig.PortBindings' in fmt:
-        output('192.168.10.1:13306:13306/tcp;192.168.10.1:18080:8080/tcp;')
-    if '.Config.User' in fmt: output('10001:10001 no')
+        output(container.get('ports', '192.168.10.1:13306:13306/tcp;192.168.10.1:18080:8080/tcp;'))
+    if '.Config.User' in fmt: output(container.get('user', '10001:10001 no'))
+    if fmt == '{{.State.Status}}': output(container.get('status', 'running' if container['running'] else 'exited'))
     if fmt == '{{.State.Running}}': output(str(container['running']).lower())
     if '.State.ExitCode' in fmt: output('false 0')
     if '.State.Health.Status' in fmt:
         healthy = not (os.environ.get('FAIL_HEALTH') and container['id'] != 'a'*64)
         output(str(container['running']).lower() + (' healthy' if healthy else ' unhealthy'))
     raise AssertionError(fmt)
+if args[0] == 'rm':
+    assert len(args) == 2 and len(args[1]) == 64, args
+    names = [name for name, item in state.items() if item['id'] == args[1]]
+    assert len(names) == 1 and names[0] in ('db-relay-rollback', 'db-relay-failed'), args
+    assert state[names[0]]['running'] is False
+    del state[names[0]]
+    save(); sys.exit(0)
 if args[0] in ('stop', 'start'):
     state[args[-1]]['running'] = args[0] == 'start'
     save(); sys.exit(0)
@@ -66,7 +80,9 @@ if args[0] == 'run':
     name = args[args.index('--name')+1]
     assert name not in state
     transaction = next((arg.split('=', 1)[1] for arg in args if arg.startswith('io.db-relay.deploy.transaction=')), 'initial')
-    state[name] = {'id': 'b'*64, 'running': True, 'transaction': transaction, 'image': 'sha256:candidate'}
+    state[name] = {'id': os.environ.get('MOCK_ID', 'b'*64), 'running': True, 'transaction': transaction,
+                   'image': os.environ.get('MOCK_IMAGE', 'sha256:candidate'),
+                   'online': 'ONLINE_UPDATE_SOCKET=/run/relay-updater/control.sock' in args}
     save()
     if name == 'db-relay' and transaction != 'initial':
         data = Path(os.environ['MOCK_ROOT'])/'db-relay'/'data'
@@ -82,7 +98,7 @@ class DeploymentTests(unittest.TestCase):
 
     def setUp(self):
         """Create isolated fixture roots and executable mocks; returns None."""
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(dir='/tmp')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         self.deploy = self.root / 'deploy'
@@ -117,7 +133,13 @@ private_file() {
         self.executable('stat', '''#!/usr/bin/env python3
 import os, stat, sys
 info = os.stat(sys.argv[-1])
-values = {'%u': str(info.st_uid), '%a': oct(stat.S_IMODE(info.st_mode))[2:], '%h': str(info.st_nlink), '%d': str(info.st_dev)}
+values = {'%u': str(info.st_uid), '%g': str(info.st_gid), '%a': oct(stat.S_IMODE(info.st_mode))[2:], '%h': str(info.st_nlink), '%d': str(info.st_dev)}
+if os.environ.get('MOCK_TRUST_ROOT'):
+    values['%u'] = '0'
+    if not sys.argv[-1].startswith(os.environ['MOCK_TRUST_ROOT']): values['%a'] = '755'
+if os.environ.get('MOCK_UPDATER_OWNER') and '/relay-updater' in sys.argv[-1]:
+    values['%u'] = '0'
+    values['%g'] = '10001'
 result = sys.argv[2]
 for key, value in values.items(): result = result.replace(key, value)
 print(result)
@@ -143,7 +165,7 @@ print(result)
         if mode:
             args.append(mode)
         return subprocess.run(args, env=dict(self.env, **environment), text=True,
-                              capture_output=True, timeout=20)
+                              capture_output=True, timeout=60)
 
     def commands(self):
         """Return all mock Docker arguments, or empty list when not invoked."""
@@ -293,6 +315,153 @@ print(result)
         self.assertNotIn('db-relay', state)
         self.assertFalse((relay/'transaction/rolled-back').exists())
         self.assertTrue((relay/'transaction/backup/secret.key').exists())
+
+    def test_finalize_then_second_apply(self):
+        """Archive snapshot, remove stopped original by ID and allow another upgrade."""
+        relay = self.relay_fixture()
+        self.assertEqual(self.invoke('relay-update.sh', 'apply').returncode, 0)
+        result = self.invoke('relay-update.sh', 'finalize')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        history = list((relay/'history').iterdir())
+        self.assertEqual(len(history), 1)
+        self.assertEqual((history[0]/'backup/secret.key').read_text(), 'old-key')
+        self.assertFalse((relay/'transaction').exists())
+        self.assertEqual([cmd for cmd in self.commands() if cmd[0] == 'rm'], [['rm', 'a'*64]])
+        result = self.invoke('relay-update.sh', 'apply', MOCK_IMAGE='sha256:second', MOCK_ID='c'*64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((relay/'transaction/original-id').read_text().strip(), 'b'*64)
+        self.assertFalse(any('redis-dev' in cmd for cmd in self.commands()))
+
+    def test_rollback_finalize_and_reapply(self):
+        """Rolled-back completion retains candidate data and removes only failed ID."""
+        relay = self.relay_fixture()
+        self.assertEqual(self.invoke('relay-update.sh', 'apply').returncode, 0)
+        self.assertEqual(self.invoke('relay-update.sh', 'rollback').returncode, 0)
+        result = self.invoke('relay-update.sh', 'finalize')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        history = next((relay/'history').iterdir())
+        self.assertEqual((history/'failed-data/config.enc').read_text(), 'candidate-config')
+        self.assertEqual([cmd for cmd in self.commands() if cmd[0] == 'rm'], [['rm', 'b'*64]])
+        self.assertEqual(self.invoke('relay-update.sh', 'apply', MOCK_ID='c'*64).returncode, 0)
+
+    def test_finalize_rejects_unsafe_identity_layout_and_running(self):
+        """Any identity, ownership, layout or running mismatch prevents removal."""
+        self.relay_fixture()
+        self.assertEqual(self.invoke('relay-update.sh', 'apply').returncode, 0)
+        baseline = json.loads(self.state.read_text())
+        changes = [('db-relay-rollback', 'status', 'dead'),
+                   ('db-relay-rollback', 'running', True), ('db-relay-rollback', 'id', 'c'*64),
+                   ('db-relay-rollback', 'label', 'foreign'), ('db-relay', 'id', 'd'*64),
+                   ('db-relay', 'user', '0:0 no'), ('db-relay-rollback', 'ports', 'foreign'),
+                   ('db-relay-rollback', 'mounts', 'foreign'), ('db-relay', 'bind_modes', 'true;true;')]
+        for name, key, value in changes:
+            with self.subTest(name=name, key=key):
+                modified = json.loads(json.dumps(baseline))
+                modified[name][key] = value
+                self.state.write_text(json.dumps(modified))
+                self.assertNotEqual(self.invoke('relay-update.sh', 'finalize').returncode, 0)
+        self.assertFalse(any(cmd[0] == 'rm' for cmd in self.commands()))
+
+    def test_finalize_unknown_or_interrupted_fails_closed(self):
+        """Unexpected state or durable finalizing intent cannot trigger cleanup."""
+        relay = self.relay_fixture()
+        self.assertEqual(self.invoke('relay-update.sh', 'apply').returncode, 0)
+        for marker in ('unknown', 'finalizing'):
+            path = relay/'transaction'/marker
+            path.write_text('yes\n')
+            path.chmod(0o600)
+            self.assertNotEqual(self.invoke('relay-update.sh', 'finalize').returncode, 0)
+            path.unlink()
+        (relay/'transaction/applied').unlink()
+        self.assertNotEqual(self.invoke('relay-update.sh', 'finalize').returncode, 0)
+        self.assertFalse(any(cmd[0] == 'rm' for cmd in self.commands()))
+
+    def test_online_bind_is_preserved(self):
+        """A validated socket enables online control and survives another update."""
+        self.relay_fixture()
+        home = self.usb/'relay-updater'
+        home.mkdir(mode=0o700)
+        run = home/'run'
+        run.mkdir(mode=0o750)
+        # Sandbox disallows Unix bind syscalls: emulate inode type only; keep
+        # production ownership, mode, symlink and directory validation intact.
+        common = self.deploy/'common.sh'
+        common.write_text(common.read_text().replace('[ -S "$USB/relay-updater/run/control.sock" ]', '[ -f "$USB/relay-updater/run/control.sock" ]'))
+        (run/'control.sock').write_text('mock socket inode')
+        (run/'control.sock').chmod(0o660)
+        environment = {'MOCK_UPDATER_OWNER': 'yes'}
+        result = self.invoke('relay-update.sh', 'apply', **environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(self.state.read_text())['db-relay']['online'])
+        self.assertEqual(self.invoke('relay-update.sh', 'finalize', **environment).returncode, 0)
+        result = self.invoke('relay-update.sh', 'apply', MOCK_IMAGE='sha256:second', MOCK_ID='c'*64, **environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (run/'control.sock').chmod(0o666)
+        self.assertNotEqual(self.invoke('relay-update.sh', 'finalize', **environment).returncode, 0)
+
+    def updater_fixture(self):
+        """Prepare mock root-owned startup files and bounded POSIX disk report."""
+        home = self.usb/'relay-updater'
+        home.mkdir(mode=0o700)
+        (home/'run').mkdir(mode=0o750)
+        (home/'config.json').write_text('{}')
+        (home/'config.json').chmod(0o600)
+        binary = self.deploy/'relay-updater'
+        binary.write_text('#!/bin/sh\nexit 0\n')
+        binary.chmod(0o700)
+        self.executable('df', '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/mock 900000 100000 800000 12%% $MOCK_ROOT\\n"\n')
+        self.executable('setsid', '#!/bin/sh\nexec "$@"\n')
+        self.env.update(MOCK_UPDATER_OWNER='yes', MOCK_TRUST_ROOT=str(self.root))
+        return home
+
+    def test_finalize_health_and_missing_candidate_refused(self):
+        """Unhealthy active service or missing saved candidate forbids cleanup."""
+        relay = self.relay_fixture()
+        self.assertEqual(self.invoke('relay-update.sh', 'apply').returncode, 0)
+        self.assertNotEqual(self.invoke('relay-update.sh', 'finalize', FAIL_HEALTH='1').returncode, 0)
+        self.assertFalse(any(cmd[0] == 'rm' for cmd in self.commands()))
+        self.assertEqual(self.invoke('relay-update.sh', 'rollback').returncode, 0)
+        state = json.loads(self.state.read_text())
+        del state['db-relay-failed']
+        self.state.write_text(json.dumps(state))
+        self.assertNotEqual(self.invoke('relay-update.sh', 'finalize').returncode, 0)
+        self.assertTrue((relay/'transaction').exists())
+
+    def test_updater_preflight_and_start_default_readonly(self):
+        """Preflight needs no image; startup default neither writes nor launches."""
+        home = self.updater_fixture()
+        result = self.invoke('updater-preflight.sh', MISSING_IMAGE='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.invoke('updater-start.sh', MISSING_IMAGE='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((home/'.daemon-lock').exists())
+        self.assertEqual(self.commands(), [])
+
+    def test_updater_disk_and_path_rejections(self):
+        """Insufficient/ambiguous disk output and unsafe runtime permissions fail."""
+        home = self.updater_fixture()
+        for available in ('524287', 'not-a-number', '9999999999999999'):
+            self.executable('df', '#!/bin/sh\nprintf "header\\n/dev/mock 900000 1 '+available+' 1%% $MOCK_ROOT\\n"\n')
+            self.assertNotEqual(self.invoke('updater-preflight.sh').returncode, 0)
+        self.executable('df', '#!/bin/sh\nprintf "header\\n/dev/mock 900000 1 524288 1%% $MOCK_ROOT\\n"\n')
+        result = self.invoke('updater-preflight.sh')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (home/'run').chmod(0o777)
+        self.assertNotEqual(self.invoke('updater-preflight.sh').returncode, 0)
+        (home/'run').chmod(0o750)
+        (home/'run').rmdir()
+        (home/'run').symlink_to(self.root)
+        self.assertNotEqual(self.invoke('updater-preflight.sh').returncode, 0)
+
+    def test_updater_config_and_lock_rejections(self):
+        """No unsafe config or existing PID lock can launch another daemon."""
+        home = self.updater_fixture()
+        (home/'config.json').chmod(0o644)
+        self.assertNotEqual(self.invoke('updater-start.sh').returncode, 0)
+        (home/'config.json').chmod(0o600)
+        (home/'.daemon-lock').mkdir(mode=0o700)
+        self.assertNotEqual(self.invoke('updater-start.sh', 'start').returncode, 0)
+        self.assertEqual(self.commands(), [])
 
     def test_shell_syntax(self):
         """Every production shell file must parse with local POSIX sh."""

@@ -1,3 +1,6 @@
+# Local environment handoff contains machine-specific details; never publish.
+/OpenWrt环境基础与Docker部署交接.md
+
 src/frontend/node_modules/
 src/frontend/dist/
 src/backend/db-relay
@@ -9,6 +12,8 @@ src/.local/
 
 # Local executables, packages, previews and credentials are never uploaded.
 src/deploy/deploy-stat
+src/deploy/relay-updater
+src/backend/relay-updater
 src/backend/deploy-stat
 release/
 *.tar

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,5 +37,34 @@ func TestInspect(t *testing.T) {
 	output.Reset()
 	if err := inspect([]string{"-c", "%u:%a:%h", path}, &output); err != nil || !strings.HasSuffix(output.String(), ":600:2\n") {
 		t.Fatalf("hardlink: %q %v", output.String(), err)
+	}
+	output.Reset()
+	if err := inspect([]string{"-c", "%h", path}, &output); err != nil || output.String() != "2\n" {
+		t.Fatalf("link count: %q %v", output.String(), err)
+	}
+}
+
+// TestSocketMetadata covers the exact format required by updater socket permission checks.
+func TestSocketMetadata(t *testing.T) {
+	directory, err := os.MkdirTemp("", "stat-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	path := filepath.Join(directory, "s")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err = os.Chmod(path, 0660); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err = inspect([]string{"-c", "%u:%g:%a", path}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != fmt.Sprintf("%d:%d:660\n", os.Getuid(), os.Getgid()) {
+		t.Fatalf("unexpected socket metadata: %q", output.String())
 	}
 }

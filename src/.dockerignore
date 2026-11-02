@@ -9,6 +9,8 @@
 **/coverage
 .git
 deploy/deploy-stat
+deploy/relay-updater
+backend/relay-updater
 backend/db-relay
 backend/deploy-stat
 **/admin_password

@@ -36,6 +36,10 @@ func inspect(args []string, output io.Writer) error {
 		result = fmt.Sprint(metadata.Uid)
 	case "%a":
 		result = fmt.Sprintf("%o", mode)
+	case "%h":
+		result = fmt.Sprint(metadata.Nlink)
+	case "%u:%g:%a":
+		result = fmt.Sprintf("%d:%d:%o", metadata.Uid, metadata.Gid, mode)
 	case "%u:%a":
 		result = fmt.Sprintf("%d:%o", metadata.Uid, mode)
 	case "%u:%a:%h":

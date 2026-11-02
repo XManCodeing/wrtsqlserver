@@ -160,8 +160,34 @@ acquire_lock() {
 }
 # release_lock(): remove only our exact lock; never recursively delete anything.
 release_lock() { rm "$LOCK/pid" && rmdir "$LOCK"; }
+# updater_run_check(require_socket): validate the root-owned USB control directory.
+# Argument yes requires a live socket inode; no permits absence before daemon start.
+# Returns success only for exact permissions and no symlink/nested-mount escapes.
+updater_run_check() {
+    private_dir "$USB/relay-updater" 0
+    safe_path "$USB/relay-updater/run"
+    [ -d "$USB/relay-updater/run" ] || fail 'updater run directory missing'
+    [ "$(file_stat -c '%u:%g:%a' "$USB/relay-updater/run")" = '0:10001:750' ] || fail 'unsafe updater run directory'
+    safe_path "$USB/relay-updater/run/control.sock"
+    if [ -e "$USB/relay-updater/run/control.sock" ]; then
+        [ -S "$USB/relay-updater/run/control.sock" ] || fail 'updater control endpoint is not a socket'
+        [ "$(file_stat -c '%u:%g:%a' "$USB/relay-updater/run/control.sock")" = '0:10001:660' ] || fail 'unsafe updater socket'
+    else
+        [ "$1" = no ] || fail 'updater control socket missing'
+    fi
+}
 # relay_run(image_id): create fixed managed relay, using established data and password.
+# Optional online control is enabled only after validating the host socket directory.
 relay_run() {
+    relay_image=$1
+    set --
+    if [ -e "$USB/relay-updater/run/control.sock" ] || [ -L "$USB/relay-updater/run/control.sock" ]; then
+        updater_run_check yes
+        set -- --mount "type=bind,src=$USB/relay-updater/run,dst=/run/relay-updater,readonly" \
+          -e ONLINE_UPDATE_SOCKET=/run/relay-updater/control.sock
+    elif [ "${REQUIRE_ONLINE_UPDATE:-no}" = yes ]; then
+        fail 'existing online update capability requires a safe updater socket'
+    fi
     docker_local run -d --pull never --name "$NAME" \
       --label "$LABEL=relay-v1" --label "io.db-relay.deploy.transaction=${TRANSACTION:-initial}" \
       --restart no --user 10001:10001 --read-only --cap-drop ALL \
@@ -175,7 +201,7 @@ relay_run() {
       -e "REDIS_ADDR=$LAN_BIND_IP:6379" \
       -p "$LAN_BIND_IP:18080:8080/tcp" -p "$LAN_BIND_IP:13306:13306/tcp" \
       --health-cmd 'wget -q -T 3 -O - http://127.0.0.1:8080/api/session | grep -q '\''"authenticated":false'\''' \
-      --health-interval 5s --health-timeout 4s --health-retries 6 "$1" >/dev/null
+      --health-interval 5s --health-timeout 4s --health-retries 6 "$@" "$relay_image" >/dev/null
 }
 # relay_health(): require Docker health plus HTTP session response; bounded 40s poll.
 relay_health() {

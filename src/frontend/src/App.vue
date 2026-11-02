@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Connection, DataLine, Monitor, Upload, Coin } from '@element-plus/icons-vue'
+import { Connection, DataLine, Monitor, Coin } from '@element-plus/icons-vue'
 import { api, errorMessage, setCsrfToken } from './api'
 import { useTheme } from './composables/useTheme'
 import { useDashboard } from './composables/useDashboard'
@@ -9,7 +9,7 @@ import LoginPanel from './components/LoginPanel.vue'
 import MappingsPage from './components/MappingsPage.vue'
 import ProxiesPage from './components/ProxiesPage.vue'
 import OverviewPage from './components/OverviewPage.vue'
-import UpdatesPage from './components/UpdatesPage.vue'
+import OnlineUpdates from './components/OnlineUpdates.vue'
 import RedisPage from './components/RedisPage.vue'
 
 const { mode, warning } = useTheme()
@@ -19,7 +19,7 @@ const authenticated = ref(false)
 const checking = ref(true)
 const sessionError = ref('')
 const loggingOut = ref(false)
-const page = ref<'overview' | 'mappings' | 'proxies' | 'updates' | 'redis'>('overview')
+const page = ref<'overview' | 'mappings' | 'proxies' | 'redis'>('overview')
 const proxyRevision = ref(0)
 const proxiesPage = ref<InstanceType<typeof ProxiesPage>>()
 
@@ -102,6 +102,7 @@ onUnmounted(() => window.removeEventListener('session-expired', expireSession))
       <div class="brand"><el-icon :size="21"><Connection /></el-icon><span>端口转发<span class="brand-secondary">控制台</span></span></div>
       <div class="topbar-actions">
         <span v-if="authenticated" class="refresh-label">{{ updatedAt ? `更新于 ${updatedAt}` : '等待服务状态' }}</span>
+        <OnlineUpdates v-if="authenticated" />
         <el-select v-model="mode" class="theme-select" aria-label="选择外观主题">
           <el-option label="浅色外观" value="light" /><el-option label="深色外观" value="dark" /><el-option label="跟随系统" value="system" />
         </el-select>
@@ -120,7 +121,6 @@ onUnmounted(() => window.removeEventListener('session-expired', expireSession))
           <el-menu-item index="mappings"><el-icon><Connection /></el-icon><span>端口映射</span></el-menu-item>
           <el-menu-item index="proxies"><el-icon><Monitor /></el-icon><span>SOCKS5 代理</span></el-menu-item>
           <el-menu-item index="redis"><el-icon><Coin /></el-icon><span>Redis 状态</span></el-menu-item>
-          <el-menu-item index="updates"><el-icon><Upload /></el-icon><span>程序更新</span></el-menu-item>
         </el-menu>
         <div class="sidebar-note">TCP 转发管理<br />配置按映射独立生效</div>
       </aside>
@@ -132,7 +132,6 @@ onUnmounted(() => window.removeEventListener('session-expired', expireSession))
         <MappingsPage v-show="page === 'mappings'" :active="page === 'mappings'" :proxy-revision="proxyRevision" :mappings="mappings" :proxies="proxies" :loading="loading" @changed="dashboard.refresh()" @create-proxy="createProxy" />
         <ProxiesPage v-show="page === 'proxies'" ref="proxiesPage" :mappings="mappings" :proxies="proxies" :loading="loading" @changed="proxiesChanged" />
         <RedisPage v-show="page === 'redis'" :active="page === 'redis'" />
-        <UpdatesPage v-show="page === 'updates'" :active="page === 'updates'" />
       </main>
     </div>
   </div>

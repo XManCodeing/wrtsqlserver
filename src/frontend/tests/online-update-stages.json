@@ -1,0 +1,23 @@
+[
+  {"state":"idle","phase":"idle"},
+  {"state":"idle","phase":"ready"},
+  {"state":"checking","phase":"check"},
+  {"state":"available","phase":"ready"},
+  {"state":"downloading","phase":"download"},
+  {"state":"applying","phase":"apply"},
+  {"state":"applying","phase":"finalize"},
+  {"state":"applying","phase":"rollback"},
+  {"state":"succeeded","phase":"complete"},
+  {"state":"rolled_back","phase":"complete"},
+  {"state":"failed","phase":"check"},
+  {"state":"failed","phase":"version"},
+  {"state":"failed","phase":"download"},
+  {"state":"failed","phase":"preflight"},
+  {"state":"failed","phase":"apply"},
+  {"state":"manual_recovery","phase":"recovery"},
+  {"state":"manual_recovery","phase":"persistence"},
+  {"state":"manual_recovery","phase":"verify"},
+  {"state":"manual_recovery","phase":"finalize"},
+  {"state":"manual_recovery","phase":"rollback"},
+  {"state":"manual_recovery","phase":"version"}
+]

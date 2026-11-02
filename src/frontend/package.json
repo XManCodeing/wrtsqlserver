@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc --noEmit && vite build",
     "typecheck": "vue-tsc --noEmit",
-    "test": "node tests/connectivity.mjs && node tests/updates.mjs && node tests/redis.mjs && node tests/redis-keys.mjs"
+    "test": "node tests/connectivity.mjs && node tests/updates.mjs && node tests/online-updates.mjs && node tests/online-update-polling.mjs && node tests/online-source.mjs && node tests/redis.mjs && node tests/redis-keys.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

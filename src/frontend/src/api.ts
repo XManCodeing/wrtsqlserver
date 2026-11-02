@@ -1,3 +1,5 @@
+import type { OnlineUpdateSource } from './composables/onlineSourceState'
+import type { OnlineUpdateStatus } from './composables/onlineUpdateState'
 import type { ConnectivityHistory, MappingInput, MappingRecord, ProxyInput, ProxyRecord, ServiceStatus, Session, TestResult, UpdatePackage, UpdateStatus, RedisStatus, RedisKeys, RedisValue } from './types'
 
 let csrfToken = ''
@@ -65,6 +67,10 @@ async function request<Result>(path: string, method = 'GET', body?: unknown, tim
     if (method !== 'GET') console.info('[api] 写入完成', { method, status: response.status })
     return payload as Result
   } catch (error) {
+    const onlineMutation = method === 'POST' && path.startsWith('/online-updates/')
+    if (onlineMutation && (error instanceof TypeError || (error instanceof DOMException && error.name === 'AbortError'))) {
+      throw new Error('更新请求连接中断或超时，执行结果尚未确认。请等待服务恢复后刷新状态，不要重复提交；可能需要重新登录。')
+    }
     const destructiveRedisRequest = method === 'POST' && /^\/redis\/databases\/db\d+\/clear$/.test(path)
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new Error(destructiveRedisRequest
@@ -87,6 +93,19 @@ export function errorMessage(error: unknown): string {
 }
 
 export const api = {
+  /** 读取宿主保存的更新来源，不以网页默认值覆盖。@returns 当前来源。 */
+  onlineUpdateSource: () => request<OnlineUpdateSource>('/online-updates/source'),
+  /** 保存公开来源标识，凭据继续由宿主配置。@param source 已校验来源。@returns 持久化来源。 */
+  saveOnlineUpdateSource: (source: OnlineUpdateSource) => request<OnlineUpdateSource>('/online-updates/source', 'POST', source),
+  /** 查询宿主更新器持久状态。@returns 在线更新状态。 */
+  onlineUpdates: () => request<OnlineUpdateStatus>('/online-updates'),
+  /** 仅检测最新正式版本，不下载或切换。@returns 更新器当前状态。 */
+  checkOnlineUpdate: () => request<OnlineUpdateStatus>('/online-updates/check', 'POST'),
+  /** 显式确认后下载并更新固定版本。@param version 已检测版本。@param digest 镜像摘要。@param confirmation 确认文字。@returns 异步操作状态。 */
+  applyOnlineUpdate: (version: string, digest: string, confirmation: string) => request<OnlineUpdateStatus>(
+    '/online-updates/apply', 'POST', { version, digest, confirmation }),
+  /** 显式确认后回退转发程序。@param confirmation 确认文字。@returns 异步操作状态。 */
+  rollbackOnlineUpdate: (confirmation: string) => request<OnlineUpdateStatus>('/online-updates/rollback', 'POST', { confirmation }),
   /** 游标浏览键，不执行KEYS。@param database 库名。@param cursor 扫描游标。@param pattern 匹配模式。@returns 本批键。 */
   redisKeys: (database: string, cursor: string, pattern: string) => request<RedisKeys>(
     `/redis/databases/${encodeURIComponent(database)}/keys?${new URLSearchParams({ cursor, pattern, count: '50' })}`),

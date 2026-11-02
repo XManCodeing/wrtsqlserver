@@ -77,10 +77,7 @@ onUnmounted(() => { disposed = true })
 
 <template>
   <section>
-    <header class="page-heading">
-      <div><h1>程序更新</h1><p>上传转发程序更新包。Redis 独立部署，不参与此流程。</p></div>
-      <el-button :loading="loading" :disabled="busy" @click="refresh">刷新状态</el-button>
-    </header>
+    <div class="section-heading"><h2>离线暂存</h2><el-button :loading="loading" :disabled="busy" @click="refresh">刷新暂存状态</el-button></div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon class="global-error" />
     <section v-loading="loading" class="panel overview-section">
       <h2>更新准备</h2>
@@ -88,9 +85,9 @@ onUnmounted(() => { disposed = true })
         <el-descriptions-item label="当前版本">{{ status?.currentVersion || '—' }}</el-descriptions-item>
         <el-descriptions-item label="部署方式">独立替换转发容器</el-descriptions-item>
         <el-descriptions-item label="更新包上传"><el-tag :type="status?.uploadEnabled ? 'success' : 'info'" effect="plain">{{ status?.uploadEnabled ? '已启用' : '未启用' }}</el-tag></el-descriptions-item>
-        <el-descriptions-item label="网页执行更新"><el-tag type="info" effect="plain">暂未开放</el-tag></el-descriptions-item>
+        <el-descriptions-item label="暂存包安装"><el-tag type="info" effect="plain">不支持</el-tag></el-descriptions-item>
       </el-descriptions>
-      <p class="field-help">{{ status?.reason || (error ? '状态读取失败，请刷新重试。' : '正在读取更新配置。') }}</p>
+      <p class="field-help">{{ status?.uploadEnabled ? '仅上传、校验与暂存签名包，不安装，不重启服务。' : status?.reason || (error ? '状态读取失败，请刷新重试。' : '正在读取更新配置。') }}</p>
     </section>
     <div class="panel table-panel">
       <div class="table-toolbar update-toolbar">
@@ -110,8 +107,7 @@ onUnmounted(() => { disposed = true })
         <template #empty><el-empty description="暂无已校验的更新包" :image-size="68" /></template>
       </el-table>
     </div>
-    <p class="field-help">仅接受签名的 linux/amd64 更新包{{ limit ? `，最大 ${limit} MB` : '' }}。校验不会安装或重启服务。首次部署及回退验证完成前，不开放网页执行更新。</p>
-    <p class="field-help">实际切换版本会断开转发连接、清空内存探测历史，并需要重新登录；Redis 不受转发更新操作影响。</p>
+    <p class="field-help">仅接受签名的 linux/amd64 更新包{{ limit ? `，最大 ${limit} MB` : '' }}。校验不会安装或重启服务；此暂存包不用于上方在线更新。</p>
   </section>
 </template>
 
