@@ -10,15 +10,12 @@ const emit = defineEmits<{ status: [value: PortsStatus | null] }>()
 const { status, loading, busy, error, blocked, refresh, apply } = usePorts(() => props.active, () => props.revision)
 watch([status, error], () => emit('status', error.value ? null : status.value), { immediate: true })
 const opened = ref(false)
-const confirmation = ref('')
-const finalizePrevious = ref(false)
 const target = ref<{ revision: string; configRevision: string; needsFinalize: boolean; added: number[]; removed: number[] } | null>(null)
 const difference = computed(() => portsDiff(status.value))
 const stateLabels = { idle: '已就绪', applying: '正在应用', failed: '应用失败', manual_recovery: '需手动恢复' }
 const stale = computed(() => !!target.value && (target.value.revision !== status.value?.revision ||
   target.value.configRevision !== status.value?.configRevision || target.value.needsFinalize !== status.value?.needsFinalize))
-const confirmationBlocked = computed(() => blocked.value || stale.value || confirmation.value !== '应用端口变更' ||
-  (!!target.value?.needsFinalize && !finalizePrevious.value))
+const confirmationBlocked = computed(() => blocked.value || stale.value)
 const summary = computed(() => status.value ? [{
   desired: formatPorts(status.value.desiredPorts), applied: formatPorts(status.value.appliedPorts),
   actual: formatPorts(status.value.actualPorts), rules: status.value.rulesReady,
@@ -29,16 +26,14 @@ function openConfirmation(): void {
   if (blocked.value || !status.value) return
   target.value = { revision: status.value.revision, configRevision: status.value.configRevision,
     needsFinalize: status.value.needsFinalize, added: [...difference.value.added], removed: [...difference.value.removed] }
-  confirmation.value = ''
-  finalizePrevious.value = false
   opened.value = true
 }
 
-/** 仅提交匹配确认文字与版本的单次请求，不提交端口数组。@returns 请求结束。 */
+/** 确认按钮授权弹窗展示的变更及回退窗口处理，保留协议字段与版本校验。@returns 请求结束。 */
 async function confirm(): Promise<void> {
-  if (confirmationBlocked.value || !target.value) return
+  if (!opened.value || confirmationBlocked.value || !target.value) return
   const input: PortsApplyInput = { revision: target.value.revision, configRevision: target.value.configRevision,
-    confirmation: '应用端口变更', finalizePrevious: target.value.needsFinalize && finalizePrevious.value }
+    confirmation: '应用端口变更', finalizePrevious: target.value.needsFinalize }
   opened.value = false
   await apply(input)
 }
@@ -81,10 +76,7 @@ async function confirm(): Promise<void> {
       <el-alert title="应用将短暂中断网页与转发连接，可能需要重新登录。断联不代表失败，恢复后仅刷新状态，不要重复提交。" type="warning" :closable="false" show-icon />
       <p class="field-help">待新增：{{ formatPorts(target?.added || []) }}；待移除：{{ formatPorts(target?.removed || []) }}。</p>
       <el-alert v-if="stale" title="映射或宿主状态已变化，请取消并重新确认最新差异。" type="warning" :closable="false" />
-      <el-form label-position="top" class="ports-confirm" @submit.prevent="confirm">
-        <el-form-item v-if="target?.needsFinalize"><el-checkbox v-model="finalizePrevious">我同意结束旧版本回退窗口，继续应用端口变更</el-checkbox></el-form-item>
-        <el-form-item label="请输入「应用端口变更」确认"><el-input v-model="confirmation" autocomplete="off" placeholder="应用端口变更" /></el-form-item>
-      </el-form>
+      <p v-if="target?.needsFinalize" class="field-help">确认应用将结束旧版本回退窗口，之后无法通过本次保留记录回退到旧版本。</p>
       <template #footer><el-button @click="opened = false">取消</el-button><el-button type="primary" :disabled="confirmationBlocked" @click="confirm">确认应用</el-button></template>
     </el-dialog>
   </section>
@@ -94,5 +86,4 @@ async function confirm(): Promise<void> {
 .ports-panel { margin-bottom: 32px; }
 .ports-panel > .el-alert { margin-bottom: 20px; }
 .ports-diff { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px; font-size: 12px; overflow-wrap: anywhere; }
-.ports-confirm { margin-top: 18px; }
 </style>

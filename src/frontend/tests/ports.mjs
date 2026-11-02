@@ -197,4 +197,56 @@ assert.match(panelSource, /class="panel table-panel"/)
 assert.match(panelSource, /class="table-toolbar"/)
 assert.doesNotMatch(panelSource, /size="small"|:deep\(|height:\s*42px/)
 assert.match(panelSource, /<el-empty[^>]+:image-size="68"/)
-console.log('Ports: schema validation, desired/actual diff, CSRF whitelist, visible-only polling, revision invalidation, explicit finalize, no POST replay and lifecycle cleanup passed')
+/** 验证真实组件确认逻辑：单次点击授权、取消不提交、过期快照拒绝。@returns 测试完成。 */
+async function testPanelConfirmation() {
+  const status = { value: { ...snapshot } }
+  const blocked = { value: false }
+  const submissions = []
+  const source = panelSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+  const compiled = ts.transpileModule(source + '\nexport { opened, openConfirmation, confirm };', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  const exports = {}
+  const dependencies = {
+    vue: { ref: value => ({ value }), computed: getter => ({ get value() { return getter() } }), watch: () => undefined },
+    '../api': { safeMessage: value => value },
+    '../composables/portsState': state,
+    '../composables/usePorts': { usePorts: () => ({ status, blocked,
+      error: { value: '' }, apply: async input => { submissions.push(input) } }) },
+  }
+  vm.runInNewContext(compiled, { exports, defineProps: () => ({ active: true, revision: 1 }),
+    defineEmits: () => () => undefined, require: name => {
+      assert.ok(name in dependencies, `unexpected dependency: ${name}`)
+      return dependencies[name]
+    } })
+  exports.openConfirmation()
+  assert.equal(submissions.length, 0)
+  exports.opened.value = false
+  await exports.confirm()
+  assert.equal(submissions.length, 0, 'cancel must not submit')
+  for (const needsFinalize of [false, true]) {
+    status.value = { ...snapshot, needsFinalize }
+    exports.openConfirmation()
+    await exports.confirm()
+    assert.deepEqual(JSON.parse(JSON.stringify(submissions.at(-1))), { ...input, finalizePrevious: needsFinalize })
+    const count = submissions.length
+    await exports.confirm()
+    assert.equal(submissions.length, count, 'closed dialog must reject repeat confirmation')
+  }
+  for (const changed of [{ revision: 'new-host' }, { configRevision: 'new-config' }, { needsFinalize: false }]) {
+    status.value = { ...snapshot, needsFinalize: true }
+    exports.openConfirmation()
+    status.value = { ...status.value, ...changed }
+    await exports.confirm()
+    assert.equal(submissions.length, 2, 'changed authorization scope must not submit')
+  }
+  status.value = { ...snapshot }
+  exports.openConfirmation()
+  blocked.value = true
+  await exports.confirm()
+  assert.equal(submissions.length, 2, 'busy/error states must not submit')
+  assert.doesNotMatch(panelSource, /<el-input|<el-checkbox|请输入/)
+  assert.match(panelSource, /确认应用将结束旧版本回退窗口/)
+}
+await testPanelConfirmation()
+console.log('Ports: schema validation, desired/actual diff, CSRF whitelist, visible-only polling, revision invalidation, one-click dialog confirmation, no POST replay and lifecycle cleanup passed')

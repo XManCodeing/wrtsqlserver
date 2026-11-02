@@ -120,6 +120,24 @@ class RestartTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.commands() if call[0] == 'update']), before)
         self.assertFalse(any(call[0] in ('start', 'stop', 'run') for call in self.commands()))
 
+    def test_redis_mount_snapshot_accepts_docker_newline_and_order(self):
+        """Docker's extra final newline and mount permutations preserve exact validation."""
+        state = self.redis_fixture()
+        records = state['redis-dev']['mount_records'].splitlines()
+        for ordered in (records, list(reversed(records))):
+            state['redis-dev']['mount_records'] = '\n'.join(ordered) + '\n'
+            self.state.write_text(json.dumps(state))
+            result = self.invoke('redis-init.sh', 'restart-migrate')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(self.state.read_text())['redis-dev']['restart'],
+                             'unless-stopped')
+        # A blank internal record must not be silently filtered out.
+        state['redis-dev']['mount_records'] = '\n\n'.join(records) + '\n'
+        self.state.write_text(json.dumps(state))
+        result = self.invoke('redis-init.sh', 'restart-migrate')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unsupported Redis mounts', result.stderr)
+
     def service_fixture(self):
         """Replace only installer trust/platform check and init destination; return init path."""
         import shutil
@@ -127,6 +145,8 @@ class RestartTests(unittest.TestCase):
         shutil.move(str(self.deploy), target)
         self.deploy = target
         self.updater_fixture()
+        # Keep retry loops fast, but allow real child scheduling in bounded CLI probes.
+        self.executable('sleep', '#!/bin/sh\n[ "$1" != 1 ] || /bin/sleep 0.05\n')
         script = self.deploy/'updater-service.sh'
         text = script.read_text().replace('INIT=/etc/init.d/relay-updater', 'INIT=$MOCK_ROOT/mock-init')
         text = text.replace('\nservice_check\ncase', '\nservice_check() { :; }\nservice_check\ncase')
@@ -162,7 +182,7 @@ class RestartTests(unittest.TestCase):
         old.mkdir(mode=0o755)
         prefix = (self.deploy/'updater-service.sh').read_text().split('\nservice_check\ncase')[0]
         renderer = self.deploy/'render-test.sh'
-        for template in ('render_legacy', 'render_v2', 'render_service'):
+        for template in ('render_legacy', 'render_v2', 'render_v3', 'render_service'):
             renderer.write_text(prefix + f'\n{template} "{old}"\n')
             result = self.invoke('render-test.sh')
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -237,9 +257,37 @@ fi
         self.assertFalse(sentinel.exists())
         self.assertEqual(self.commands(), [])
         content = init.read_text()
-        self.assertIn('timeout 5 docker --host', content)
+        self.assertIn('bounded_docker --host', content)
+        self.assertNotIn('timeout 5 docker', content)
         self.assertNotIn('respawn', content)
         self.assertNotIn("updater-service.sh' check", content)
+
+    def test_bounded_probe_needs_no_timeout_and_reaps_hung_child(self):
+        """Generated init preserves output/status and kills a stuck direct Docker child."""
+        import os
+        import time
+        init = self.service_fixture()
+        # Isolate the generated helper; forbid accidental use of a system timeout utility.
+        self.executable('timeout', '#!/bin/sh\nexit 99\n')
+        self.executable('sleep', '#!/bin/sh\nexec /bin/sleep "$@"\n')
+        helper = init.read_text().split('if [ "${1:-}" = boot-run ];')[0]
+        init.write_text(helper + '\nbounded_docker --host unix:///var/run/docker.sock info\n')
+        for status in (0, 7):
+            self.executable('docker', f'#!/bin/sh\nprintf "probe-output\\n"\nexit {status}\n')
+            result = subprocess.run(['sh', str(init)], env=self.env, text=True,
+                                    capture_output=True, timeout=8)
+            self.assertEqual(result.returncode, status, result.stderr)
+            self.assertEqual(result.stdout, 'probe-output\n')
+        child_pid = self.root/'probe-pid'
+        self.executable('docker', f'#!/bin/sh\nprintf "%s" "$$" > "{child_pid}"\ntrap "" TERM\nexec /bin/sleep 60\n')
+        started = time.monotonic()
+        result = subprocess.run(['sh', str(init)], env=self.env, text=True,
+                                capture_output=True, timeout=9)
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertLess(time.monotonic() - started, 8)
+        self.assertIn('probe timed out', result.stderr)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(child_pid.read_text()), 0)
 
     def test_boot_readiness_rejects_wrong_storage_and_nested_bundle(self):
         """Exercise real gate parsing with isolated mount/device/daemon metadata fixtures."""

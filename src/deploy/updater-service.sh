@@ -29,7 +29,6 @@ service_check() {
     case "$HERE" in "$USB"/*) ;; *) fail 'service bundle must reside on verified USB';; esac
     case "$HERE" in *[!a-zA-Z0-9_./-]*) fail 'unsupported deployment directory characters';; esac
     [ -f /etc/rc.common ] || fail 'OpenWrt rc.common required'
-    command -v timeout >/dev/null || fail 'timeout required for bounded boot readiness checks'
     command -v cmp >/dev/null || fail 'cmp required for exact init template validation'
 }
 # render_legacy(bundle): render known v1 bytes only; optional bundle defaults to HERE.
@@ -112,9 +111,9 @@ start_service() {
 if [ "${1:-}" = boot-run ]; then boot_run; exit $?; fi
 BOOT_GATE
 }
-# render_service(bundle): extend known v2 with read-only active-container readiness; writes stdout.
-# The legacy renderer stays byte-for-byte stable for cross-bundle template verification.
-render_service() {
+# render_v3(bundle): reproduce the released active-relay gate byte-for-byte for upgrades.
+# Optional bundle defaults to HERE; output is the previously trusted template.
+render_v3() {
     render_v2 "${1:-$HERE}" | awk '
       $0=="boot_ready() {" {print "storage_ready() {"; next}
       /^if \[ "\$\{1:-\}" = boot-run \];/ {next}
@@ -133,6 +132,48 @@ boot_ready() {
 }
 if [ "${1:-}" = boot-run ]; then boot_run; exit $?; fi
 RELAY_GATE
+}
+# render_service(bundle): embed the bounded Docker probe in local init; no timeout package needed.
+# Optional bundle defaults to HERE; emits trusted code before any USB scripts may be loaded.
+render_service() {
+    render_v3 "${1:-$HERE}" | awk '
+      /^if \[ "\$\{1:-\}" = boot-run \];/ {next}
+      {gsub("# db-relay-updater-procd-v2", "# db-relay-updater-procd-v4")}
+      {gsub("timeout 5 docker", "bounded_docker")}
+      {print}
+    '
+    cat <<'BOUNDED_DOCKER'
+# bounded_docker(args...): run one Docker CLI probe for at most five polling intervals.
+# Arguments are Docker CLI flags; returns CLI status, 124 on timeout, 143 on interruption.
+# Docker is the direct child (no shell wrapper/grandchildren); only this probe is killed.
+# A subshell isolates traps and PIDs from procd's worker and leaves stdout unchanged.
+bounded_docker() (
+    probe_pid=
+    trap '
+        if [ -n "$probe_pid" ]; then
+            kill -KILL "$probe_pid" 2>/dev/null || :
+            wait "$probe_pid" 2>/dev/null || :
+        fi
+    ' EXIT
+    trap 'exit 143' HUP INT TERM
+    docker "$@" &
+    probe_pid=$!
+    probe_ticks=0
+    while kill -0 "$probe_pid" 2>/dev/null; do
+        if [ "$probe_ticks" -ge 5 ]; then
+            printf '%s\n' 'relay-updater: Docker readiness probe timed out' >&2
+            exit 124
+        fi
+        sleep 1 || exit 1
+        probe_ticks=$((probe_ticks + 1))
+    done
+    probe_status=0
+    wait "$probe_pid" || probe_status=$?
+    probe_pid=
+    exit "$probe_status"
+)
+if [ "${1:-}" = boot-run ]; then boot_run; exit $?; fi
+BOUNDED_DOCKER
 }
 # previous_bundle_check(path): require explicit canonical USB directory and trusted root ancestors.
 # Does not source/read executable code in the old bundle; returns only after safe_path validation.
@@ -169,7 +210,7 @@ install_service() {
         if template_matches render_service "$HERE"; then log 'procd already current; no change'; return 0; fi
         previous_bundle=${PREVIOUS_BUNDLE:-$HERE}
         previous_bundle_check "$previous_bundle"
-        template_matches render_legacy "$previous_bundle" || template_matches render_v2 "$previous_bundle" || template_matches render_service "$previous_bundle" || fail 'unknown or edited init; declare its trusted PREVIOUS_BUNDLE, refusing overwrite'
+        template_matches render_legacy "$previous_bundle" || template_matches render_v2 "$previous_bundle" || template_matches render_v3 "$previous_bundle" || template_matches render_service "$previous_bundle" || fail 'unknown or edited init; declare its trusted PREVIOUS_BUNDLE, refusing overwrite'
     else
         [ ! -e "$INIT" ] || fail 'service already installed; use explicit upgrade for known v1'
     fi

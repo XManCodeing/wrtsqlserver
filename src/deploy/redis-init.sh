@@ -32,7 +32,11 @@ redis_restart_migrate() {
         '999:999 no'|'999:999 unless-stopped') ;; *) fail 'unsupported Redis user/restart policy';;
     esac
     expected=$(printf '%s\n' "$REDIS/data|/data|true" "$REDIS/config/redis.conf|/usr/local/etc/redis/redis.conf|false" | LC_ALL=C sort)
-    actual=$(docker_local inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{printf "%s|%s|%t\n" .Source .Destination .RW}}{{end}}{{end}}' "$redis_id" | LC_ALL=C sort)
+    # Capture first: Docker adds a final newline after the template's own newline.
+    # Command substitution strips trailing newlines before sorting, avoiding a leading
+    # empty record. Keep inspect outside a pipeline so daemon failures cannot be hidden.
+    actual=$(docker_local inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{printf "%s|%s|%t\n" .Source .Destination .RW}}{{end}}{{end}}' "$redis_id") || fail 'cannot inspect Redis mounts'
+    actual=$(printf '%s\n' "$actual" | LC_ALL=C sort)
     [ "$actual" = "$expected" ] || fail 'unsupported Redis mounts'
     extra=$(docker_local inspect --format '{{range .Mounts}}{{if ne .Type "bind"}}{{.Type}}:{{.Destination}};{{end}}{{end}}' "$redis_id")
     case "$extra" in ''|'tmpfs:/tmp;') ;; *) fail 'unsupported Redis non-bind mount';; esac
