@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -24,10 +25,19 @@ func NewGitHub() *GitHub {
 	return &GitHub{Client: &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 45 * time.Second, CheckRedirect: releaseRedirect}, Token: readToken}
 }
 
-// readToken reads the fixed root-private token, rejecting header injection without logging it.
+// readToken returns no credential when the optional file is absent; unsafe files still fail closed.
 func readToken() (string, error) {
 	data, err := privateRead(TokenPath, 4096)
-	if err != nil {
+	return optionalToken(data, err)
+}
+
+// optionalToken validates privateRead output; only absence permits anonymous public access.
+// data contains private credential bytes; readErr is the secure reader's error. Returns a token or safe error.
+func optionalToken(data []byte, readErr error) (string, error) {
+	if errors.Is(readErr, os.ErrNotExist) {
+		return "", nil
+	}
+	if readErr != nil {
 		return "", errors.New("GitHub credential unavailable")
 	}
 	token := strings.TrimSpace(string(data))
@@ -86,7 +96,9 @@ func (github *GitHub) apiGet(ctx context.Context, path, accept string, limit int
 	if err != nil {
 		return nil, errors.New("cannot create GitHub request")
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
 	request.Header.Set("Accept", accept)
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	request.Header.Set("User-Agent", "relay-updater")
