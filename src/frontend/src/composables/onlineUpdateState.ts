@@ -9,6 +9,8 @@ export interface OnlineRelease {
 
 export interface OnlineUpdateStatus {
   enabled: boolean
+  /** 无宿主服务时仅可读取公开源并检测，不授予更新权限。 */
+  checkOnly?: boolean
   currentVersion: string
   latest: OnlineRelease | null
   stagedUpdates?: boolean
@@ -34,7 +36,8 @@ const stateLabels: Record<OnlineUpdateState, string> = {
 /** 生成状态标签，仅服务端终态表示成功或失败。@param status 持久快照。@returns 展示文字。 */
 export function onlinePhaseLabel(status: OnlineUpdateStatus | null): string {
   if (!status) return '正在读取'
-  if (!status.enabled) return '未启用'
+  if (!status.enabled && !status.checkOnly) return '未启用'
+  if (status.checkOnly && status.state === 'failed') return '检测失败'
   return stateLabels[status.state] ?? '未知状态'
 }
 
@@ -55,7 +58,7 @@ export function onlineTransferSize(bytes: number | undefined): string {
 
 /** 用户打开弹窗时才检测，已有任务或待重启包不被自动检测覆盖。@param status 当前快照。@returns 是否可自动检测。 */
 export function canCheckOnOpen(status: OnlineUpdateStatus | null): boolean {
-  return !!status?.enabled && !onlineOperationActive(status) && !status.prepared && status.state !== 'manual_recovery'
+  return !!(status?.enabled || status?.checkOnly) && !onlineOperationActive(status) && !status?.prepared && status?.state !== 'manual_recovery'
 }
 
 /** 判断更新器是否忙碌。@param status 当前快照。@returns 是否正在执行操作。 */

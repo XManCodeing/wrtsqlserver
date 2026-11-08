@@ -30,7 +30,11 @@ const { histories, now, error: historyError, loading: historyLoading, probing, p
 /** 区分程序监听与宿主发布，不将保存成功误报为 LAN 可达。@param record 映射。@returns 发布提示。 */
 function publicationLabel(record: MappingRecord): string {
   if (!record.enabled) return ''
+  if (props.portStatus?.management === 'host') {
+    return record.status === 'running' ? '宿主直接监听' : '监听未就绪'
+  }
   if (record.listenHost !== '0.0.0.0') return '仅指定地址监听'
+  if (props.portStatus?.management === 'external') return '发布请在容器面板核对'
   if (!props.portStatus?.supported) return '发布待核验'
   if (!props.portStatus.actualPorts.includes(record.listenPort)) return '待应用发布'
   return props.portStatus.rulesReady ? '已发布 · LAN 已就绪' : 'LAN 规则未就绪'
@@ -168,6 +172,6 @@ async function act(record: MappingRecord, action: 'toggle' | 'delete' | 'test'):
       <span><i class="legend-success" />通畅</span><span><i class="legend-failure" />阻塞</span><span><i class="legend-unknown" />无记录</span>
       每格 1 分钟；S5 为代理建连及认证，目标为经代理连接目标端口。悬停查看耗时。停用暂停采样，配置修改或重启后重新积累。
     </p>
-    <MappingDialog ref="editor" :proxies="proxies" @saved="emit('changed')" />
+    <MappingDialog ref="editor" :proxies="proxies" :host-network="portStatus?.management === 'host'" @saved="emit('changed')" />
   </section>
 </template>

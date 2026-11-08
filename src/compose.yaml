@@ -1,47 +1,38 @@
-# Reference only. OpenWrt Docker 20.10 has NO Compose: use deploy/relay-init.sh.
-# Modern Compose is needed for bind.create_host_path=false and pull_policy.
-# Compose does NOT enforce USB UUID, mount or LAN checks: manually perform all
-# deploy script checks first. Do not create host paths on a missing USB mount.
-# Management HTTP is plaintext; LAN binding is not source isolation. No WAN.
-# Set a mapping in the UI to 0.0.0.0:13306 with explicit allowedCIDRs.
-# Redis is intentionally separate in deploy/redis-compose.yaml; relay updates
-# must never operate on the Redis container, configuration or data.
+# Ubuntu / xpanel: exactly two ordinary containers, no host updater or Docker socket.
+# Required panel variables: LAN_BIND_IP, ADMIN_PASSWORD_PATH (absolute secret file).
+# Set RELAY_IMAGE to a published version/digest, or build this source via:
+#   docker compose build db-relay
+#   docker compose up -d --pull never
+# Use a stable Compose project name so named volumes survive panel redeployment.
+# Never use `down -v` during updates. Back up volumes before migrating/upgrading.
+# Publish additional forwarding ports here (host port = container listener port).
+# LAN binding is not a source ACL; enforce trusted-client access at the host/network.
 services:
   db-relay:
-    image: "${RELAY_IMAGE:?Set a locally imported versioned relay image}"
-    pull_policy: never
-    platform: linux/amd64
-    container_name: db-relay
-    restart: "no"
+    image: "${RELAY_IMAGE:-local/db-relay:portable}"
+    build:
+      context: .
+      args:
+        VERSION: "${RELAY_VERSION:-1.2.2-portable}"
+    restart: unless-stopped
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    cpus: 0.5
-    mem_limit: 128m
-    memswap_limit: 128m
-    pids_limit: 64
-    stop_grace_period: 15s
-    # Script-managed updates require this label AND exact expected mounts/ports.
-    labels:
-      io.db-relay.deploy.managed: relay-v1
+    mem_limit: 256m
+    pids_limit: 128
+    stop_grace_period: 20s
     environment:
       LISTEN_ADDR: "0.0.0.0:8080"
       APP_DATA_DIR: /data
       WEB_DIR: /app/web
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
-      MAX_CONNECTIONS: "128"
-      # Read-only PING/INFO via the independently published Redis LAN port.
-      # This does not start Redis or grant Docker access; routing must be verified.
-      REDIS_ADDR: "${LAN_BIND_IP:?Set verified LAN IPv4}:6379"
+      MAX_CONNECTIONS: "1024"
+      REDIS_ADDR: "redis-dev:6379"
     volumes:
+      - relay-data:/data
       - type: bind
-        source: /mnt/docker-usb/db-relay/data
-        target: /data
-        bind:
-          create_host_path: false
-      - type: bind
-        source: /mnt/docker-usb/db-relay/admin_password
+        source: "${ADMIN_PASSWORD_PATH:?Set absolute path to a private password file readable by UID 10001}"
         target: /run/secrets/admin_password
         read_only: true
         bind:
@@ -49,15 +40,45 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=8m
     ports:
-      - "${LAN_BIND_IP:?Set verified LAN IPv4}:18080:8080/tcp"
-      - "${LAN_BIND_IP:?Set verified LAN IPv4}:13306:13306/tcp"
+      - "${LAN_BIND_IP:?Set the Ubuntu host trusted LAN IPv4}:18080:8080/tcp"
+      - "${LAN_BIND_IP:?Set the Ubuntu host trusted LAN IPv4}:3306:3306/tcp"
+      - "${LAN_BIND_IP:?Set the Ubuntu host trusted LAN IPv4}:13306:13306/tcp"
+      - "${LAN_BIND_IP:?Set the Ubuntu host trusted LAN IPv4}:23306:23306/tcp"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -T 3 -O - http://127.0.0.1:8080/api/session | grep -q '\"authenticated\":false'"]
-      interval: 5s
+      interval: 10s
       timeout: 4s
       retries: 6
+      start_period: 10s
     logging:
       driver: json-file
       options:
-        max-size: "2m"
+        max-size: "5m"
         max-file: "2"
+
+  redis-dev:
+    image: redis:7.4.7-alpine
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 64
+    stop_grace_period: 30s
+    # No host port: unauthenticated Redis is accessible only on this Docker network.
+    # Configure authentication and trusted-client rules before exposing it externally.
+    command: ["redis-server", "--bind", "0.0.0.0", "--protected-mode", "no", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  relay-data:
+  redis-data:

@@ -10,9 +10,19 @@ FROM golang:1.26-alpine AS backend
 WORKDIR /build/backend
 ARG VERSION=1.0.0
 COPY backend/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/db-relay .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/db-relay . \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/relay-updater ./cmd/relay-updater
+
+# Export the Linux host updater without installing Go on Ubuntu.
+# docker build --target updater-export --output type=local,dest=./data/updater/bin .
+FROM scratch AS updater-export
+COPY --from=backend /out/relay-updater /relay-updater
 
 FROM alpine:3.23
+ARG VERSION=1.0.0
+LABEL org.opencontainers.image.version=$VERSION
+LABEL io.db-relay.network.host="v1"
+LABEL io.db-relay.runtime="portable-v1"
 RUN apk add --no-cache ca-certificates \
     && addgroup -g 10001 relay \
     && adduser -D -u 10001 -G relay relay \

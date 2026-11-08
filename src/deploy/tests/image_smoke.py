@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,7 @@ def wait_http(base):
             time.sleep(1)
 
 
-def verify(base, password):
+def verify(base, password, host_network=False):
     """Check static UI, login and protected status without logging any credentials."""
     with urllib.request.urlopen(base + '/', timeout=5) as response:
         assert b'<html' in response.read(1 << 20)
@@ -40,12 +41,33 @@ def verify(base, password):
     with urllib.request.urlopen(request, timeout=5) as response:
         assert 'csrfToken' in json.load(response)
         cookie = response.headers['Set-Cookie'].split(';', 1)[0]
-    for endpoint in ('/api/status', '/api/redis/status', '/api/online-updates'):
+    for endpoint in ('/api/status', '/api/redis/status', '/api/online-updates', '/api/ports'):
         request = urllib.request.Request(base + endpoint, headers={'Cookie': cookie})
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.load(response)
             if endpoint == '/api/online-updates':
                 assert payload['enabled'] is False
+                assert payload['checkOnly'] is True
+            if endpoint == '/api/ports' and host_network:
+                assert payload['management'] == 'host'
+                assert payload['canApply'] is False
+
+
+def verify_host_image(image, name, data, secret, password):
+    """Exercise Linux host mode with a temporary loopback management listener."""
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1', 0))
+        port = reservation.getsockname()[1]
+    docker('run', '-d', '--name', name, '--pull', 'never', '--network', 'host',
+           '--user', '10001:10001', '--read-only', '--cap-drop', 'ALL',
+           '--security-opt', 'no-new-privileges:true', '--memory', '128m',
+           '--pids-limit', '64', '--tmpfs', '/tmp:rw,noexec,nosuid,size=8m',
+           '-v', f'{data}:/data', '-v', f'{secret}:/run/secrets/admin_password:ro',
+           '-e', 'ADMIN_PASSWORD_FILE=/run/secrets/admin_password',
+           '-e', 'RELAY_NETWORK_MODE=host', '-e', f'LISTEN_ADDR=127.0.0.1:{port}', image)
+    base = f'http://127.0.0.1:{port}'
+    wait_http(base)
+    verify(base, password, host_network=True)
 
 
 def main(image):
@@ -74,7 +96,9 @@ def main(image):
             base = 'http://127.0.0.1:' + port
             wait_http(base)
             verify(base, password)
-            print('Image smoke test passed: nonroot/read-only startup, login, status and disabled updater')
+            docker('rm', '-f', name)
+            verify_host_image(image, name, data, secret, password)
+            print('Image smoke test passed: bridge/host networking, nonroot startup, login and check-only updates')
         finally:
             try:
                 docker('rm', '-f', name)

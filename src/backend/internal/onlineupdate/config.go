@@ -29,6 +29,11 @@ const (
 
 // Config contains only trusted host configuration, never credentials.
 type Config struct {
+	HostMode       string `json:"hostMode,omitempty"`
+	ProjectDir     string `json:"projectDir,omitempty"`
+	ComposeFile    string `json:"composeFile,omitempty"`
+	ComposeProject string `json:"composeProject,omitempty"`
+	RelayService   string `json:"relayService,omitempty"`
 	DeployDir      string `json:"deployDir"`
 	LANInterface   string `json:"lanInterface"`
 	LANBindIP      string `json:"lanBindIP"`
@@ -56,22 +61,43 @@ func versionParts(version string) ([3]uint64, error) {
 	return parts, nil
 }
 
-// newer reports whether candidate is strictly newer than current, rejecting invalid versions.
-func newer(candidate, current string) bool {
+// currentVersionParts accepts stable versions and the one explicitly supported bootstrap build.
+// version is a local running identity, never a release candidate; unknown suffixes fail closed.
+// It returns numeric components, whether the build precedes its stable core, and validation errors.
+func currentVersionParts(version string) ([3]uint64, bool, error) {
+	bootstrap := version == "1.2.3-ubuntu"
+	if bootstrap {
+		version = "1.2.3"
+	}
+	parts, err := versionParts(version)
+	return parts, bootstrap, err
+}
+
+// ReleaseNewer compares a stable candidate with a validated local version.
+// Only the explicit 1.2.3-ubuntu bootstrap sorts below its equal stable core;
+// older cores and arbitrary suffixes never authorize an update.
+// The second result reports whether both identities were safely comparable.
+func ReleaseNewer(candidate, current string) (bool, bool) {
 	candidateParts, err := versionParts(candidate)
 	if err != nil {
-		return false
+		return false, false
 	}
-	currentParts, err := versionParts(current)
+	currentParts, bootstrap, err := currentVersionParts(current)
 	if err != nil {
-		return false
+		return false, false
 	}
 	for index := range candidateParts {
 		if candidateParts[index] != currentParts[index] {
-			return candidateParts[index] > currentParts[index]
+			return candidateParts[index] > currentParts[index], true
 		}
 	}
-	return false
+	return bootstrap, true
+}
+
+// newer returns whether candidate may upgrade current using the shared fail-closed policy.
+func newer(candidate, current string) bool {
+	upgrade, _ := ReleaseNewer(candidate, current)
+	return upgrade
 }
 
 // decodeStrict reads at most limit bytes, rejecting unknown fields and trailing JSON.
@@ -151,8 +177,17 @@ func LoadConfig(path string) (Config, error) {
 	if err = decodeStrict(strings.NewReader(string(data)), 4096, &config); err != nil {
 		return config, err
 	}
+	if config.HostMode == "ubuntu" {
+		if _, _, err = currentVersionParts(config.InitialVersion); err != nil {
+			return config, err
+		}
+		return config, validateUbuntuConfig(config)
+	}
 	if _, err = versionParts(config.InitialVersion); err != nil {
 		return config, err
+	}
+	if config.HostMode != "" && config.HostMode != "openwrt" {
+		return config, errors.New("unsupported host mode")
 	}
 	address := net.ParseIP(config.LANBindIP)
 	if !config.LANConfirmed || !interfacePattern.MatchString(config.LANInterface) || address == nil || address.To4() == nil || !address.IsPrivate() || address.String() != config.LANBindIP {

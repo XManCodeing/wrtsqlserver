@@ -40,7 +40,25 @@ async function confirm(): Promise<void> {
 </script>
 
 <template>
-  <section class="ports-panel" aria-label="宿主端口管理">
+  <section v-if="!status" class="ports-panel" aria-label="读取端口模式">
+    <el-alert v-if="error" :title="error" type="warning" :closable="false" show-icon />
+    <span v-else class="muted">正在读取端口模式…</span>
+    <el-button v-if="error" link type="primary" :loading="loading" @click="refresh">重试</el-button>
+  </section>
+  <template v-else-if="status.management === 'host'">
+    <section v-if="error" class="ports-panel" aria-label="端口状态异常">
+      <el-alert :title="error" type="warning" :closable="false" show-icon />
+    </section>
+  </template>
+  <section v-else-if="status?.management === 'external'" class="ports-panel" aria-label="容器端口发布">
+    <el-alert title="端口发布由容器面板管理" type="info" :closable="false" show-icon>
+      <p class="field-help">新增映射时，请在 xpanel 或 Compose 中发布对应的 TCP 端口；已有发布端口无需重复配置。此处不修改宿主网络。</p>
+      <p class="field-help">当前启用的转发端口：{{ formatPorts(status.desiredPorts) }}。实际发布情况请在容器面板核对。</p>
+      <p v-if="error" class="field-help" role="alert">{{ error }}</p>
+      <el-button link type="primary" :loading="loading" @click="refresh">刷新</el-button>
+    </el-alert>
+  </section>
+  <section v-else class="ports-panel" aria-label="宿主端口管理">
     <header class="page-heading">
       <div><h1>宿主端口管理</h1><p>管理 Docker 发布端口与 LAN 例外，保存映射后在此应用变更。</p></div>
       <el-button type="primary" :loading="busy || status?.state === 'applying'" :disabled="blocked" @click="openConfirmation">应用端口变更</el-button>

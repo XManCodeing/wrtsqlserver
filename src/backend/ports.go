@@ -17,6 +17,7 @@ import (
 // portPanelStatus is the bounded public contract; config revision belongs to this application.
 type portPanelStatus struct {
 	Supported      bool   `json:"supported"`
+	Management     string `json:"management,omitempty"`
 	SchemaVersion  int    `json:"schemaVersion"`
 	Revision       string `json:"revision"`
 	ConfigRevision string `json:"configRevision"`
@@ -94,6 +95,18 @@ func (proxy *onlineUpdateProxy) hostJSON(ctx context.Context, method, path strin
 // readPortStatus reads only host state and enriches it from a locked application snapshot.
 func (app *App) readPortStatus(ctx context.Context) (portPanelStatus, error) {
 	status := portPanelStatus{SchemaVersion: 1, State: "idle", AppliedPorts: []int{}, ActualPorts: []int{}, DesiredPorts: []int{}, Message: "需要手动升级或启动宿主管理服务"}
+	if app.hostNetworking {
+		status.Management = "host"
+		status.ConfigRevision = app.portRevision()
+		status.Message = "保存并启用映射后直接监听宿主端口，无需 Docker 端口发布；外部访问仍受来源白名单与防火墙控制。"
+		return status, nil
+	}
+	if app.onlineUpdates == nil {
+		// Without a host socket, Docker publication belongs to the external panel.
+		// Never invent actual ports or firewall readiness from application listeners.
+		status.Management = "external"
+		status.Message = "宿主端口由容器面板或 Compose 管理；新增监听端口后，请同步配置 Docker 端口映射。"
+	}
 	if app.onlineUpdates != nil {
 		code, err := app.onlineUpdates.hostJSON(ctx, http.MethodGet, "/ports", nil, &status)
 		if err != nil && code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
@@ -108,6 +121,18 @@ func (app *App) readPortStatus(ctx context.Context) (portPanelStatus, error) {
 		return status, errors.New("宿主端口状态格式无效，已禁止变更")
 	}
 	status.ConfigRevision = app.portRevision()
+	if status.Management == "external" {
+		// Report container listeners only; old router publication limits do not apply.
+		seen := map[int]bool{}
+		for _, mapping := range app.cfg.Mappings {
+			if mapping.Enabled && mapping.ListenHost == "0.0.0.0" && !seen[mapping.ListenPort] {
+				status.DesiredPorts = append(status.DesiredPorts, mapping.ListenPort)
+				seen[mapping.ListenPort] = true
+			}
+		}
+		sort.Ints(status.DesiredPorts)
+		return status, nil
+	}
 	ports, err := publicationPorts(app.cfg, status.RequiredPorts)
 	if err != nil {
 		status.CanApply = false
@@ -213,6 +238,9 @@ func (app *App) hostMutationAllowed() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if app.hostNetworking {
+		return app.updateMutationAllowed(ctx)
+	}
 	status := portPanelStatus{}
 	code, err := app.onlineUpdates.hostJSON(ctx, http.MethodGet, "/ports", nil, &status)
 	legacy := code == http.StatusNotFound || code == http.StatusMethodNotAllowed
@@ -225,16 +253,25 @@ func (app *App) hostMutationAllowed() error {
 	if status.State == "applying" || status.State == "manual_recovery" {
 		return errors.New("宿主端口事务进行中或需要恢复，暂时禁止修改映射与代理")
 	}
+	return app.updateMutationAllowed(ctx)
+}
+
+// updateMutationAllowed checks the updater transaction, independently of Docker port publication.
+// ctx bounds the host request; caller holds app.mu. Returns a safe error when writes are blocked.
+func (app *App) updateMutationAllowed(ctx context.Context) error {
 	update := struct {
 		State string `json:"state"`
 	}{}
-	_, err = app.onlineUpdates.hostJSON(ctx, http.MethodGet, "/status", nil, &update)
+	_, err := app.onlineUpdates.hostJSON(ctx, http.MethodGet, "/status", nil, &update)
 	if err != nil {
 		return err
 	}
 	switch update.State {
+	case "idle", "available", "succeeded", "rolled_back", "failed":
+		return nil
 	case "checking", "downloading", "pulling", "applying", "rolling_back", "manual_recovery":
 		return errors.New("宿主更新事务进行中或需要恢复，暂时禁止修改配置")
+	default:
+		return errors.New("无法确认宿主更新状态，暂时禁止修改配置")
 	}
-	return nil
 }

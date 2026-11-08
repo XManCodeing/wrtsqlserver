@@ -34,7 +34,8 @@ export function useOnlineUpdates(active: () => boolean) {
 
   /** 提交单次显式操作；错误后的结果必须由 GET 核实。@param operation 单次 API 调用。@returns 请求结束。 */
   async function submit(operation: () => Promise<OnlineUpdateStatus>): Promise<void> {
-    if (blocked.value || !status.value?.enabled) return
+    if (blocked.value || !(status.value?.enabled || status.value?.checkOnly)) return
+    if (status.value?.checkOnly && operation !== api.checkOnlineUpdate) return
     const publishRevision = revision
     const canPublish = () => !disposed && publishRevision === revision && active()
     busy.value = true

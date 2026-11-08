@@ -82,7 +82,11 @@ jobs:
           (cd src/backend && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o ../deploy/relay-updater ./cmd/relay-updater)
           mkdir -p release
           tar -czf "release/db-relay-deploy-$VERSION.tar.gz" -C src/deploy common.sh ports-common.sh lan-rules.sh legacy-lan-validate.awk lan-manage.sh lan-restore.sh updater-service.sh redis-init.sh relay-init.sh relay-update.sh updater-preflight.sh updater-start.sh redis.conf deploy-stat relay-updater
-          (cd release && sha256sum "db-relay-deploy-$VERSION.tar.gz" > SHA256SUMS)
+          # Keep the legacy OpenWrt bundle unchanged; Ubuntu gets explicit portable helpers.
+          tar --owner=0 --group=0 --numeric-owner -czf "release/db-relay-ubuntu-$VERSION.tar.gz" -C src/deploy relay-updater ubuntu-install.py ubuntu-update.py -C .. compose.ubuntu.yaml
+          (cd release && sha256sum "db-relay-deploy-$VERSION.tar.gz" "db-relay-ubuntu-$VERSION.tar.gz" > SHA256SUMS)
+          # Fail before publication if the Ubuntu updater or install/recovery helper is missing.
+          tar -tzf "release/db-relay-ubuntu-$VERSION.tar.gz"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -126,6 +130,18 @@ jobs:
           # Older Docker 20.10 hosts: publish a conventional image without attestation manifests.
           provenance: false
           sbom: false
+      - name: Verify portable image identity before publication
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Verify the actual image, not a workflow-injected label that could hide an old Dockerfile.
+          docker image inspect "$IMAGE" | jq -e --arg version "$VERSION" '
+            length == 1 and .[0].Os == "linux" and .[0].Architecture == "amd64" and
+            .[0].Config.Labels["org.opencontainers.image.version"] == $version and
+            .[0].Config.Labels["io.db-relay.runtime"] == "portable-v1" and
+            .[0].Config.Labels["io.db-relay.network.host"] == "v1"' > /dev/null
       - name: Smoke-test built image before publication
         env:
           IMAGE: ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}
@@ -147,8 +163,11 @@ jobs:
         run: |
           set -eu
           printf '%s:%s\n%s@%s\n' "$IMAGE" "$VERSION" "$IMAGE" "$DIGEST" > release/IMAGE.txt
+          # Keep the four-field discovery schema compatible with deployed OpenWrt updaters.
+          # Ubuntu verifies portable-v1 on the pulled immutable image, not an untrusted manifest flag.
           jq -n --arg version "$VERSION" --arg image "$IMAGE" --arg digest "$DIGEST" '{version:$version,image:$image,digest:$digest,platform:"linux/amd64"}' > release/relay-release.json
-          printf 'Image: `%s:%s`\n\nDigest: `%s`\n\nDownload the matching manual-deploy artifact. No router deployment was performed.\n' "$IMAGE" "$VERSION" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          (cd release && sha256sum IMAGE.txt relay-release.json >> SHA256SUMS)
+          printf 'Image: `%s:%s`\n\nDigest: `%s`\n\nRuntime: `portable-v1` (Ubuntu and OpenWrt). Download the matching host deployment artifact and verify SHA256SUMS. No host deployment was performed.\n' "$IMAGE" "$VERSION" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: db-relay-deploy-${{ steps.release.outputs.version }}
@@ -164,7 +183,7 @@ jobs:
         run: |
           set -eu
           # Publish only after the image and all attachments are ready. Drafts are never offered by the updater.
-          gh release create "v$VERSION" --target "$COMMIT" --title "v$VERSION" --draft --notes 'Relay update: download and verify the pinned linux/amd64 image, replace only db-relay, health-check and retain rollback. Redis remains independent.' release/relay-release.json release/IMAGE.txt release/SHA256SUMS "release/db-relay-deploy-$VERSION.tar.gz"
+          gh release create "v$VERSION" --target "$COMMIT" --title "v$VERSION" --draft --notes 'Portable-v1 relay for Ubuntu and OpenWrt: verify SHA256SUMS and select the matching host tools (db-relay-ubuntu or db-relay-deploy). Online updates pin the linux/amd64 image digest, replace only db-relay, health-check and retain rollback. Redis remains independent. Existing Ubuntu installations must update their host updater/helper before promoting 1.2.3-ubuntu to stable.' release/relay-release.json release/IMAGE.txt release/SHA256SUMS "release/db-relay-deploy-$VERSION.tar.gz" "release/db-relay-ubuntu-$VERSION.tar.gz"
           gh release edit "v$VERSION" --draft=false --latest
       - name: Publish latest convenience alias
         env:

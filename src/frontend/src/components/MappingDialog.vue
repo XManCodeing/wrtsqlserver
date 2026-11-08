@@ -5,7 +5,7 @@ import { api, errorMessage, safeMessage } from '../api'
 import { byteLength, mappingInput, validateMapping } from '../validation'
 import type { MappingInput, MappingRecord, ProxyRecord } from '../types'
 
-const props = defineProps<{ proxies: ProxyRecord[] }>()
+const props = defineProps<{ proxies: ProxyRecord[]; hostNetwork?: boolean }>()
 const emit = defineEmits<{ saved: [] }>()
 const visible = ref(false)
 const saving = ref(false)
@@ -82,7 +82,8 @@ defineExpose({ open })
         <el-form-item label="监听地址" required><el-input v-model="draft.listenHost" placeholder="本机监听 IP" /></el-form-item>
         <el-form-item label="监听端口" required><el-input-number v-model="draft.listenPort" :min="1" :max="65535" controls-position="right" /></el-form-item>
       </div>
-      <p class="field-help compact-help">Docker bridge 模式需监听 0.0.0.0；未发布端口将在上方显示待应用，确认应用后才可从 LAN 访问。不能绑定宿主机 LAN IP。</p>
+      <p v-if="hostNetwork" class="field-help compact-help">直接监听小主机端口，可填写小主机内网 IP；127.0.0.1 仅限本机访问。保存并启用后生效，端口不可被其他服务占用。</p>
+      <p v-else class="field-help compact-help">Docker bridge 模式需监听 0.0.0.0，并发布对应的容器端口才能从 LAN 访问；发布方式见页面上方说明。不能绑定宿主机 LAN IP。</p>
       <el-alert v-if="draft.listenHost.trim() === '0.0.0.0'" title="将监听所有 IPv4 接口，请仅允许可信来源网段。" type="warning" :closable="false" show-icon class="setup-alert" />
       <div class="form-grid host-port">
         <el-form-item label="目标主机" required><el-input v-model="draft.targetHost" placeholder="由 SOCKS5 代理访问的主机名或 IP" /></el-form-item>

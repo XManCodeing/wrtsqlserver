@@ -1,0 +1,94 @@
+# Ubuntu native listeners. Use this standalone manifest, NOT compose.bind.yaml.
+# Run from the project root with --env-file data/ubuntu.vars -p db-relay.
+# Bind paths retain the already-migrated data; never run down -v during migration.
+# Host networking requires Linux. Firewall/source ACLs still control LAN access.
+services:
+  db-relay:
+    image: "${RELAY_IMAGE:-local/db-relay:ubuntu}"
+    build:
+      context: .
+      args:
+        VERSION: "${RELAY_VERSION:-1.2.3}"
+    network_mode: host
+    # Fixed ownership marker lets the host updater reject unrelated services.
+    labels:
+      io.db-relay.deploy.managed: relay-ubuntu-v1
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    # Permit low TCP ports without granting root or any host administration capability.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+    stop_grace_period: 20s
+    environment:
+      LISTEN_ADDR: "${LAN_BIND_IP:?Set Ubuntu LAN IPv4}:18080"
+      RELAY_NETWORK_MODE: host
+      APP_DATA_DIR: /data
+      WEB_DIR: /app/web
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      MAX_CONNECTIONS: "1024"
+      REDIS_ADDR: "${LAN_BIND_IP:?Set Ubuntu LAN IPv4}:6379"
+      ONLINE_UPDATE_SOCKET: "${ONLINE_UPDATE_SOCKET:-}"
+    volumes:
+      - type: bind
+        source: ./data/relay
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/secrets/admin_password
+        target: /run/secrets/admin_password
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/updater/run
+        target: /run/relay-updater
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O - http://${LAN_BIND_IP:?Set Ubuntu LAN IPv4}:18080/api/session | grep -q '\"authenticated\":false'"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  redis-dev:
+    image: redis:7.4.7-alpine
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 64
+    stop_grace_period: 30s
+    # Preserve password-free trusted-LAN access; never publish on all host interfaces.
+    # Any device reaching this port can read/write Redis. Do not forward it to the Internet.
+    ports:
+      - "${LAN_BIND_IP:?Set Ubuntu LAN IPv4}:6379:6379/tcp"
+    command: ["redis-server", "--bind", "0.0.0.0", "--protected-mode", "no", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - type: bind
+        source: ./data/redis
+        target: /data
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

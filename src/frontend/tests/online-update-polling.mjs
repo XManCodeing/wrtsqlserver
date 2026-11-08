@@ -117,6 +117,21 @@ watcher()
 finishClosedWrite({ ...snapshot, state: 'failed', message: 'stale write' })
 await closedWrite
 assert.equal(model.status.value.message, 'ready')
+// 只读能力仅允许固定检测函数，轮询和任意写操作都不会发送检测。
+active = true
+fakeApi.onlineUpdates = async () => ({ ...snapshot, enabled: false, checkOnly: true, state: 'idle', prepared: null })
+watcher()
+await Promise.resolve()
+let publicChecks = 0
+fakeApi.checkOnlineUpdate = async () => { publicChecks++; return { ...model.status.value, state: 'available' } }
+assert.equal(publicChecks, 0)
+await model.submit(async () => { writes++; return snapshot })
+assert.equal(publicChecks, 0)
+const beforeCheckOnlyWrites = writes
+await model.submit(fakeApi.checkOnlineUpdate)
+assert.equal(publicChecks, 1)
+assert.equal(writes, beforeCheckOnlyWrites)
+assert.equal(model.status.value.state, 'available')
 unmount()
 assert.equal(visibilityListener, undefined)
 console.log('Online composable: 1.5-second active/visible polling, no hidden refresh, state preservation, no automatic/repeated POST and cleanup passed')

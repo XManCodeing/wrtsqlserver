@@ -1,5 +1,6 @@
 export interface PortsStatus {
   supported: boolean
+  management?: 'external' | 'host'
   schemaVersion: 1
   revision: string
   configRevision: string
@@ -31,7 +32,8 @@ export function validatePortsStatus(value: unknown): PortsStatus {
   const status = value as Record<string, unknown>
   const booleans = ['supported', 'rulesReady', 'canApply', 'needsFinalize']
   const strings = ['revision', 'configRevision', 'operationId', 'message']
-  if (status.schemaVersion !== 1 || booleans.some(key => typeof status[key] !== 'boolean') ||
+  if (status.schemaVersion !== 1 || (status.management !== undefined && !['external', 'host'].includes(String(status.management))) ||
+    booleans.some(key => typeof status[key] !== 'boolean') ||
     strings.some(key => typeof status[key] !== 'string') ||
     !['idle', 'applying', 'failed', 'manual_recovery'].includes(String(status.state))) {
     throw new Error('端口状态协议不兼容，请检查宿主版本。')

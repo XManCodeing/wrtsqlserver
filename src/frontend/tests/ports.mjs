@@ -29,6 +29,14 @@ assert.equal(JSON.stringify(state.portsDiff(snapshot)), JSON.stringify({ added: 
 assert.equal(state.formatPorts([13306, 3306, 3306]), '3306、13306')
 assert.equal(state.formatPorts([]), '无')
 assert.equal(state.validatePortsStatus(snapshot), snapshot)
+const external = { ...snapshot, management: 'external', supported: false, canApply: false,
+  actualPorts: [], appliedPorts: [], rulesReady: false }
+assert.equal(state.validatePortsStatus(external), external)
+assert.equal(state.portsCanApply(external), false)
+const host = { ...external, management: 'host' }
+assert.equal(state.validatePortsStatus(host), host)
+assert.equal(state.portsCanApply(host), false)
+assert.throws(() => state.validatePortsStatus({ ...snapshot, management: 'unknown' }))
 for (const invalid of [null, {}, { ...snapshot, schemaVersion: 2 }, { ...snapshot, desiredPorts: [0] },
   { ...snapshot, actualPorts: [65536] }, { ...snapshot, state: 'unknown' }, { ...snapshot, canApply: 'true' }]) {
   assert.throws(() => state.validatePortsStatus(invalid))
@@ -190,8 +198,17 @@ async function testRequestContract() {
 }
 await testRequestContract()
 
+// 顶栏、侧栏、内容区必须共用宽度令牌，防止宽屏和紧凑断点再次错位。
+const themeSource = readFileSync(new URL('../src/styles/theme.css', import.meta.url), 'utf8')
+assert.match(themeSource, /\.topbar\s*\{[^}]*max\(var\(--app-content-padding\), calc\(100% - var\(--app-sidebar-width\) - var\(--app-content-max-width\) \+ var\(--app-content-padding\)\)\)/)
+assert.match(themeSource, /\.main-content\s*\{[^}]*padding: var\(--app-content-padding\)[^}]*max-width: var\(--app-content-max-width\)/)
+assert.match(themeSource, /@media \(max-width: 1100px\)\s*\{\s*:root\s*\{ --app-content-padding: 24px; --app-sidebar-width: 176px;/)
+
 // 上下板块必须复用统一表格基础样式，不另设小字号或行高。
 const panelSource = readFileSync(new URL('../src/components/PortsPanel.vue', import.meta.url), 'utf8')
+// Host 模式成功时不渲染面板节点，避免说明删除后仍留下 margin-bottom 占位。
+assert.doesNotMatch(panelSource, /端口直接在小主机监听/)
+assert.match(panelSource, /<template v-else-if="status.management === 'host'">\s*<section v-if="error" class="ports-panel"/)
 assert.match(panelSource, /class="page-heading"/)
 assert.match(panelSource, /class="panel table-panel"/)
 assert.match(panelSource, /class="table-toolbar"/)

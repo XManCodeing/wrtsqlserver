@@ -61,6 +61,10 @@ func readPasswordFile(reader io.Reader) (string, error) {
 
 // run initializes secure storage, binds management first, then serves until shutdown or error.
 func run() error {
+	networkMode := os.Getenv("RELAY_NETWORK_MODE")
+	if networkMode != "" && networkMode != "bridge" && networkMode != "host" {
+		return errors.New("RELAY_NETWORK_MODE must be bridge or host")
+	}
 	password, err := adminPassword()
 	if err != nil {
 		return err

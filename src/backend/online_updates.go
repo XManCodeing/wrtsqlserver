@@ -148,11 +148,7 @@ func (app *App) handleOnlineUpdates(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	if app.onlineUpdates == nil {
-		if action == "/status" {
-			writeJSON(writer, 200, disabledOnlineStatus())
-		} else {
-			apiError(writer, 503, "在线更新未启用。")
-		}
+		handleReadOnlyOnline(writer, request, action)
 		return
 	}
 	var body []byte

@@ -48,6 +48,10 @@ func fakeOnlineUpdater(t *testing.T, handler http.HandlerFunc) *onlineUpdateProx
 
 // TestOnlineUpdateRoutesAndAuth verifies the disabled contract and authentication boundaries on every operation.
 func TestOnlineUpdateRoutesAndAuth(t *testing.T) {
+	checker, calls := mockPublicChecker(t, "1.0.0", publicManifest())
+	previous := publicOnlineChecker
+	publicOnlineChecker = checker
+	t.Cleanup(func() { publicOnlineChecker = previous })
 	app := testApp(t)
 	app.onlineUpdates = nil
 	cookie, csrf := loginTest(t, app)
@@ -79,11 +83,24 @@ func TestOnlineUpdateRoutesAndAuth(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if response.Code != 200 || status["enabled"] != false || status["state"] != "idle" || status["phase"] != "idle" || status["updatedAt"] != "" || len(status) != 10 {
+	if response.Code != 200 || status["enabled"] != false || status["state"] != "idle" || status["phase"] != "idle" || status["updatedAt"] != "" || status["checkOnly"] != true || status["canApply"] != false || status["canRollback"] != false {
 		t.Fatal(status)
 	}
-	if response := requestAPI(app, "POST", "/api/online-updates/check", "", cookie, csrf); response.Code != 503 {
+	if calls.Load() != 0 {
+		t.Fatal("status/authentication requests unexpectedly fetched releases")
+	}
+	if response := requestAPI(app, "POST", "/api/online-updates/check", "", cookie, csrf); response.Code != 202 {
 		t.Fatal(response.Code)
+	}
+	deadline := time.Now().Add(time.Second)
+	for checker.snapshot().State == "checking" {
+		if time.Now().After(deadline) {
+			t.Fatal("mock release check did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() != 2 || checker.snapshot().CanApply {
+		t.Fatal("check-only capability unexpectedly changed")
 	}
 }
 
@@ -267,8 +284,19 @@ func TestOnlineSource(t *testing.T) {
 	}
 	app.onlineUpdates = nil
 	for _, method := range []string{"GET", "POST"} {
-		if response := requestAPI(app, method, path, payload, cookie, csrf); response.Code != 503 {
-			t.Fatal(response.Code)
+		expected := http.StatusServiceUnavailable
+		if method == "GET" {
+			expected = http.StatusOK
+		}
+		response := requestAPI(app, method, path, payload, cookie, csrf)
+		if response.Code != expected {
+			t.Fatal(method, response.Code)
+		}
+		if method == "GET" {
+			var source onlineSource
+			if json.Unmarshal(response.Body.Bytes(), &source) != nil || source.RepositoryURL != "https://github.com/XManCodeing/wrtsqlserver" || source.Image != "ghcr.io/xmancodeing/wrtsqlserver" {
+				t.Fatal("unexpected public release source", response.Body.String())
+			}
 		}
 	}
 	app.onlineUpdates = newOnlineUpdateProxy("/nonexistent-relay-updater/control.sock")

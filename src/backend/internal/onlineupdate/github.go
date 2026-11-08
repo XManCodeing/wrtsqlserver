@@ -21,8 +21,14 @@ type GitHub struct {
 }
 
 // NewGitHub creates a client with strict cross-origin redirect and credential policy.
-func NewGitHub() *GitHub {
-	return &GitHub{Client: &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 45 * time.Second, CheckRedirect: releaseRedirect}, Token: readToken}
+func NewGitHub() *GitHub { return NewGitHubAt(TokenPath) }
+
+// NewGitHubAt reads an optional root-private token from trusted host-specific storage.
+func NewGitHubAt(tokenPath string) *GitHub {
+	return &GitHub{Client: &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 45 * time.Second, CheckRedirect: releaseRedirect}, Token: func() (string, error) {
+		data, err := privateRead(tokenPath, 4096)
+		return optionalToken(data, err)
+	}}
 }
 
 // readToken returns no credential when the optional file is absent; unsafe files still fail closed.

@@ -103,13 +103,16 @@ func respondError(writer http.ResponseWriter, status int, message string) {
 }
 
 // PrepareHost verifies root-only state access and the exact socket directory ownership/mode.
-func PrepareHost() error {
+func PrepareHost() error { return prepareHostAt(Root) }
+
+// prepareHostAt validates root-private state and the shared run directory for a trusted root.
+func prepareHostAt(root string) error {
 	if os.Geteuid() != 0 {
 		return errors.New("relay-updater must run as host root")
 	}
-	for _, path := range []string{Root, filepath.Dir(SocketPath)} {
+	for _, path := range []string{root, filepath.Join(root, "run")} {
 		mode, group := os.FileMode(0750), 10001
-		if path == Root {
+		if path == root {
 			mode, group = 0700, 0
 		}
 		if _, err := os.Lstat(path); os.IsNotExist(err) {
@@ -140,11 +143,15 @@ func PrepareHost() error {
 
 // ListenHost holds an exclusive process lock and binds only the fixed filesystem socket.
 // The returned cleanup function closes the listener, removes the socket and releases the lock.
-func ListenHost() (net.Listener, func(), error) {
-	if err := PrepareHost(); err != nil {
+func ListenHost() (net.Listener, func(), error) { return ListenHostAt(Root) }
+
+// ListenHostAt binds the same restricted socket API under a trusted host-specific state root.
+func ListenHostAt(root string) (net.Listener, func(), error) {
+	socketPath := filepath.Join(root, "run/control.sock")
+	if err := prepareHostAt(root); err != nil {
 		return nil, nil, err
 	}
-	lockPath := Root + "/process.lock"
+	lockPath := root + "/process.lock"
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, nil, err
@@ -156,29 +163,29 @@ func ListenHost() (net.Listener, func(), error) {
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return fail(errors.New("updater already running"))
 	}
-	if info, statErr := os.Lstat(SocketPath); statErr == nil {
+	if info, statErr := os.Lstat(socketPath); statErr == nil {
 		stat := info.Sys().(*syscall.Stat_t)
 		if info.Mode()&os.ModeSocket == 0 || stat.Uid != 0 || stat.Gid != 10001 || info.Mode().Perm() != 0660 {
 			return fail(errors.New("unsafe existing control socket"))
 		}
-		if err = os.Remove(SocketPath); err != nil {
+		if err = os.Remove(socketPath); err != nil {
 			return fail(err)
 		}
 	} else if !os.IsNotExist(statErr) {
 		return fail(statErr)
 	}
-	listener, err := net.Listen("unix", SocketPath)
+	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return fail(err)
 	}
-	if err = os.Chown(SocketPath, 0, 10001); err == nil {
-		err = os.Chmod(SocketPath, 0660)
+	if err = os.Chown(socketPath, 0, 10001); err == nil {
+		err = os.Chmod(socketPath, 0660)
 	}
 	if err != nil {
 		listener.Close()
 		return fail(err)
 	}
-	cleanup := func() { listener.Close(); os.Remove(SocketPath); lock.Close() }
+	cleanup := func() { listener.Close(); os.Remove(socketPath); lock.Close() }
 	return listener, cleanup, nil
 }
 

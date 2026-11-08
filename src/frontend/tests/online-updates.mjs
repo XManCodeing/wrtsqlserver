@@ -72,6 +72,12 @@ for (const stage of stages) {
   assert.equal(onlinePhaseLabel(actual), labels[stage.state], JSON.stringify(stage))
 }
 assert.equal(onlinePhaseLabel({ ...response.payload, enabled: false }), '未启用')
+const checkOnly = { ...response.payload, enabled: false, checkOnly: true, state: 'available', prepared: null, canApply: false, canRollback: false }
+assert.equal(onlinePhaseLabel(checkOnly), '发现新版本')
+assert.equal(onlinePhaseLabel({ ...checkOnly, state: 'failed' }), '检测失败')
+assert.equal(canCheckOnOpen(checkOnly), true)
+assert.equal(canCheckOnOpen({ ...checkOnly, checkOnly: false }), false)
+assert.equal(canCheckOnOpen({ ...checkOnly, state: 'checking' }), false)
 const applying = { ...response.payload, state: 'applying', phase: 'rollback' }
 assert.match(onlineDisconnectedMessage(applying), /最终结果以恢复后的状态为准/)
 assert.equal(applying.state, 'applying', 'disconnect must preserve persistent state')
@@ -96,6 +102,9 @@ assert.doesNotMatch(component, /<el-input|openConfirmation|v-model="confirmation
 assert.match(component, /稍后重启/)
 assert.match(component, /api\.activateOnlineUpdate/)
 assert.doesNotMatch(component, /api\.applyOnlineUpdate/)
+assert.doesNotMatch(component, /xpanel|镜像更新由容器面板管理/)
+assert.match(component, /缺少宿主更新服务/)
+assert.match(component, /检测新版/)
 // 用真实 Vue 响应式运行组件逻辑，验证自动检测只在打开后发生以及每次动作只发一次。
 const reactiveStatus = ref({ ...ready, state: 'idle', prepared: null, latest: { version: '1.2.3', digest: 'sha256:abc' }, stagedUpdates: true, canApply: true })
 const submitted = []
@@ -137,6 +146,17 @@ reactiveStatus.value = { ...reactiveStatus.value, stagedUpdates: false, prepared
 const beforeLegacy = submitted.length
 await actions.download()
 assert.equal(submitted.length, beforeLegacy, 'legacy host must never silently fall back to download-and-apply')
+actions.opened.value = false
+await nextTick()
+reactiveStatus.value = { ...reactiveStatus.value, ...checkOnly, stagedUpdates: true, canApply: true }
+const beforeReadOnly = submitted.length
+actions.openUpdates()
+await nextTick()
+assert.equal(submitted.length, beforeReadOnly + 1, 'read-only mode checks only on explicit open')
+assert.equal(submitted.at(-1), 'check')
+await actions.download()
+await actions.restart()
+assert.equal(submitted.length, beforeReadOnly + 1, 'check-only mode never installs even with stale host capability fields')
 actions.opened.value = false
 await nextTick()
 console.log('Online updates: staged download/activate, real progress, open detection, CSRF, no typed confirmation and no retries passed')

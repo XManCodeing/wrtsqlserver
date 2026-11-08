@@ -14,11 +14,11 @@ const sourceSaving = ref(false)
 const checkOnOpen = ref(false)
 const actionBlocked = computed(() => blocked.value || sourceSaving.value)
 const label = computed(() => onlinePhaseLabel(status.value))
-const prepared = computed(() => status.value?.prepared ?? null)
+const prepared = computed(() => status.value?.enabled && !status.value.checkOnly ? status.value.prepared ?? null : null)
 const downloading = computed(() => status.value?.state === 'downloading')
 const applying = computed(() => status.value?.state === 'applying')
 const percent = computed(() => onlineDownloadPercent(status.value))
-const canDownload = computed(() => status.value?.stagedUpdates === true && status.value.canApply && !prepared.value)
+const canDownload = computed(() => status.value?.enabled && !status.value.checkOnly && status.value.stagedUpdates === true && status.value.canApply && !prepared.value)
 const tagType = computed(() => {
   if (onlineOperationActive(status.value)) return 'info'
   if (status.value?.state === 'failed' || status.value?.state === 'manual_recovery') return 'danger'
@@ -62,7 +62,7 @@ async function restart(): Promise<void> {
 
 /** 按钮明确回退至保留版本，兼容原有协议而不增加手动输入。@returns 单次提交结束。 */
 async function rollback(): Promise<void> {
-  if (actionBlocked.value || !status.value?.canRollback) return
+  if (actionBlocked.value || !status.value?.enabled || status.value.checkOnly || !status.value.canRollback) return
   await submit(() => api.rollbackOnlineUpdate('回退转发程序'))
 }
 
@@ -77,10 +77,12 @@ async function sourceSaved(): Promise<void> {
 <template>
   <el-button text size="small" aria-label="程序更新与仓库设置" @click="openUpdates">
     {{ status?.currentVersion || initialVersion ? `v${status?.currentVersion || initialVersion}` : '程序更新' }}
-    <span v-if="status?.canApply || prepared" class="version-notice">{{ prepared ? '待重启' : '有更新' }}</span>
+    <span v-if="status?.canApply || status?.state === 'available' || prepared" class="version-notice">{{ prepared ? '待重启' : '有更新' }}</span>
   </el-button>
   <el-dialog v-model="opened" title="版本更新" width="560px" :close-on-click-modal="false">
     <div class="update-body">
+      <el-alert v-if="status?.checkOnly" title="缺少宿主更新服务" description="可以检测新版；下载、重启和回退需要连接宿主更新服务。当前使用默认公开来源，只读。" type="info" :closable="false" show-icon />
+      <el-alert v-else-if="status && !status.enabled" title="更新服务暂不可用" description="请检查宿主更新服务配置，恢复后刷新状态。" type="info" :closable="false" show-icon />
       <div class="update-heading">
         <strong>{{ prepared ? '新版本已准备就绪' : '程序更新' }}</strong>
         <el-tag :type="tagType" size="small" effect="plain">{{ label }}</el-tag>
@@ -107,9 +109,9 @@ async function sourceSaved(): Promise<void> {
     </div>
     <template #footer>
       <div class="update-footer">
-        <el-button v-if="status?.canRollback && !prepared && !onlineOperationActive(status)" :disabled="actionBlocked" @click="rollback">回退上次变更</el-button>
+        <el-button v-if="status?.enabled && !status.checkOnly && status.canRollback && !prepared && !onlineOperationActive(status)" :disabled="actionBlocked" @click="rollback">回退上次变更</el-button>
         <el-button v-if="error" :loading="loading" :disabled="busy" @click="refresh">刷新状态</el-button>
-        <el-button v-else-if="!prepared && !onlineOperationActive(status)" :disabled="actionBlocked || !status?.enabled || status?.state === 'manual_recovery'" @click="submit(api.checkOnlineUpdate)">重新检测</el-button>
+        <el-button v-else-if="canCheckOnOpen(status)" :disabled="actionBlocked" @click="submit(api.checkOnlineUpdate)">{{ status?.latest ? '重新检测' : '检测新版' }}</el-button>
         <el-button @click="opened = false">{{ prepared ? '稍后重启' : '关闭' }}</el-button>
         <el-button v-if="prepared" type="primary" :disabled="actionBlocked || !status?.stagedUpdates" @click="restart">重启并更新</el-button>
         <el-button v-else-if="canDownload || downloading" type="primary" :loading="downloading" :disabled="actionBlocked" @click="download">{{ downloading ? '正在下载' : '下载更新' }}</el-button>

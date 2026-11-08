@@ -85,6 +85,10 @@ func (host *DockerHost) trustedDeployment() error {
 
 // environment builds a minimal environment without inherited proxy, Docker context or secrets.
 func (host *DockerHost) environment(release Release) []string {
+	if host.Config.HostMode == "ubuntu" {
+		root := host.Config.RuntimeRoot()
+		return []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=" + root, "DOCKER_CONFIG=" + filepath.Join(root, "docker"), "COMPOSE_DISABLE_ENV_FILE=1"}
+	}
 	values := []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=" + Root, "DOCKER_CONFIG=" + DockerConfig, "LAN_INTERFACE=" + host.Config.LANInterface, "LAN_BIND_IP=" + host.Config.LANBindIP, "LAN_INTERFACE_CONFIRMED=yes"}
 	if release.Version != "" {
 		values = append(values, "RELAY_IMAGE="+release.Image+":"+release.Version, "REQUIRE_ONLINE_UPDATE=yes")
@@ -150,6 +154,9 @@ func (host *DockerHost) Script(ctx context.Context, mode string, release Release
 // Preflight validates trusted dependencies and the mounted USB before any host writes.
 // It is also repeated before every image pull; the shell check never mutates host state.
 func (host *DockerHost) Preflight(ctx context.Context) error {
+	if host.Config.HostMode == "ubuntu" {
+		return (&UbuntuHost{Config: host.Config, Runner: host.Runner}).Preflight(ctx)
+	}
 	if err := host.trustedDeployment(); err != nil {
 		return errors.New("deployment trust check failed")
 	}
@@ -216,6 +223,9 @@ func (host *DockerHost) VerifyPrepared(ctx context.Context, release Release) err
 	}
 	if json.Unmarshal(data, &image) != nil || image.OS+"/"+image.Architecture != Platform {
 		return errors.New("image platform rejected")
+	}
+	if host.Config.HostMode == "ubuntu" && image.Config.Labels["io.db-relay.runtime"] != RuntimeContract {
+		return errors.New("image lacks portable-v1 runtime contract; OpenWrt releases are unsupported")
 	}
 	if image.Config.Labels["org.opencontainers.image.version"] != release.Version {
 		return errors.New("image OCI version does not match release")

@@ -27,6 +27,72 @@ func TestDesiredPorts(t *testing.T) {
 	}
 }
 
+// TestExternalPortManagement verifies standalone operation never claims Docker publication.
+// Input is an authenticated application without a host socket; no host writes are allowed.
+func TestExternalPortManagement(t *testing.T) {
+	app := testApp(t)
+	app.onlineUpdates = nil
+	app.cfg.Mappings = []Mapping{
+		{Enabled: true, ListenHost: "0.0.0.0", ListenPort: 6379},
+		{Enabled: true, ListenHost: "0.0.0.0", ListenPort: 6379},
+		{Enabled: true, ListenHost: "127.0.0.1", ListenPort: 13306},
+	}
+	cookie, csrf := loginTest(t, app)
+	response := requestAPI(app, "GET", "/api/ports", "", cookie, csrf)
+	var status portPanelStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || status.Management != "external" || status.Supported || status.CanApply || status.RulesReady || len(status.ActualPorts) != 0 {
+		t.Fatal(response.Body.String())
+	}
+	if len(status.DesiredPorts) != 1 || status.DesiredPorts[0] != 6379 {
+		t.Fatalf("router restrictions leaked into external mode: %+v", status)
+	}
+	if err := app.hostMutationAllowed(); err != nil {
+		t.Fatalf("standalone configuration blocked: %v", err)
+	}
+	body := `{"revision":"external","configRevision":"` + status.ConfigRevision + `","confirmation":"应用端口变更","finalizePrevious":false}`
+	if result := requestAPI(app, "POST", "/api/ports/apply", body, cookie, csrf); result.Code != 409 {
+		t.Fatal(result.Code, result.Body.String())
+	}
+}
+
+// TestHostNetworkPorts reports direct listeners without probing legacy publication rules.
+// The updater remains responsible only for serializing image update transactions.
+func TestHostNetworkPorts(t *testing.T) {
+	app := testApp(t)
+	app.hostNetworking = true
+	app.onlineUpdates = fakeOnlineUpdater(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/status" {
+			t.Errorf("host mode unexpectedly requested %s", request.URL.Path)
+		}
+		writeJSON(writer, 200, map[string]string{"state": "idle"})
+	})
+	cookie, csrf := loginTest(t, app)
+	response := requestAPI(app, "GET", "/api/ports", "", cookie, csrf)
+	var status portPanelStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || status.Management != "host" || status.CanApply || status.RulesReady {
+		t.Fatal(response.Body.String())
+	}
+	if err := app.hostMutationAllowed(); err != nil {
+		t.Fatal(err)
+	}
+	app.onlineUpdates = fakeOnlineUpdater(t, func(writer http.ResponseWriter, request *http.Request) {
+		writeJSON(writer, 200, map[string]string{"state": "applying"})
+	})
+	if err := app.hostMutationAllowed(); err == nil {
+		t.Fatal("host mode allowed config mutation while replacing the container")
+	}
+	body := `{"revision":"host","configRevision":"` + status.ConfigRevision + `","confirmation":"应用端口变更","finalizePrevious":false}`
+	if result := requestAPI(app, "POST", "/api/ports/apply", body, cookie, csrf); result.Code != 409 {
+		t.Fatal(result.Code, result.Body.String())
+	}
+}
+
 // TestPortsRouteAuthAndLegacy verifies safe downgrade without modifying legacy hosts.
 func TestPortsRouteAuthAndLegacy(t *testing.T) {
 	app := testApp(t)

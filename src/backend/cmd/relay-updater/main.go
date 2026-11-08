@@ -31,24 +31,35 @@ func run(configPath string, logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	host := &onlineupdate.DockerHost{Config: config, Runner: onlineupdate.ExecRunner{}}
+	var host interface {
+		onlineupdate.Host
+		Preflight(context.Context) error
+	} = &onlineupdate.DockerHost{Config: config, Runner: onlineupdate.ExecRunner{}}
+	if config.HostMode == "ubuntu" {
+		host = &onlineupdate.UbuntuHost{Config: config, Runner: onlineupdate.ExecRunner{}}
+	}
+	root := config.RuntimeRoot()
 	preflightCtx, cancelPreflight := context.WithTimeout(context.Background(), time.Minute)
-	err = host.Preflight(preflightCtx)
+	if config.HostMode != "ubuntu" {
+		err = host.Preflight(preflightCtx)
+	}
 	cancelPreflight()
 	if err != nil {
 		return err
 	}
-	listener, cleanup, err := onlineupdate.ListenHost()
+	listener, cleanup, err := onlineupdate.ListenHostAt(root)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	service, err := onlineupdate.NewService(onlineupdate.FileStore{Path: onlineupdate.StatePath}, host, onlineupdate.NewGitHub(), logger)
+	service, err := onlineupdate.NewService(onlineupdate.FileStore{Path: root + "/status.json"}, host, onlineupdate.NewGitHubAt(root+"/github-token"), logger)
 	if err != nil {
 		return err
 	}
-	if err = service.ConfigurePorts(onlineupdate.PortFileStore{Path: onlineupdate.Root + "/ports-v1.json"}); err != nil {
-		return err
+	if config.HostMode != "ubuntu" {
+		if err = service.ConfigurePorts(onlineupdate.PortFileStore{Path: root + "/ports-v1.json"}); err != nil {
+			return err
+		}
 	}
 	server := &http.Server{Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
