@@ -73,6 +73,8 @@ jobs:
         run: go test -race ./... && go vet ./...
       - name: Test deployment isolation
         run: python3 -m unittest discover -s src/deploy/tests -v
+      - name: Verify Ubuntu firewall unit definitions
+        run: systemd-analyze verify src/deploy/db-relay-firewall.service src/deploy/db-relay-firewall.path src/deploy/db-relay-firewall.timer
       - name: Package manual deployment tools
         env:
           VERSION: ${{ steps.release.outputs.version }}
@@ -83,7 +85,7 @@ jobs:
           mkdir -p release
           tar -czf "release/db-relay-deploy-$VERSION.tar.gz" -C src/deploy common.sh ports-common.sh lan-rules.sh legacy-lan-validate.awk lan-manage.sh lan-restore.sh updater-service.sh redis-init.sh relay-init.sh relay-update.sh updater-preflight.sh updater-start.sh redis.conf deploy-stat relay-updater
           # Keep the legacy OpenWrt bundle unchanged; Ubuntu gets explicit portable helpers.
-          tar --owner=0 --group=0 --numeric-owner -czf "release/db-relay-ubuntu-$VERSION.tar.gz" -C src/deploy relay-updater ubuntu-install.py ubuntu-update.py -C .. compose.ubuntu.yaml
+          tar --owner=0 --group=0 --numeric-owner -czf "release/db-relay-ubuntu-$VERSION.tar.gz" -C src/deploy relay-updater ubuntu-install.py ubuntu-update.py ubuntu-firewall.py install-ubuntu-firewall.sh db-relay-firewall.service db-relay-firewall.path db-relay-firewall.timer -C .. compose.ubuntu.yaml
           (cd release && sha256sum "db-relay-deploy-$VERSION.tar.gz" "db-relay-ubuntu-$VERSION.tar.gz" > SHA256SUMS)
           # Fail before publication if the Ubuntu updater or install/recovery helper is missing.
           tar -tzf "release/db-relay-ubuntu-$VERSION.tar.gz"
@@ -183,7 +185,7 @@ jobs:
         run: |
           set -eu
           # Publish only after the image and all attachments are ready. Drafts are never offered by the updater.
-          gh release create "v$VERSION" --target "$COMMIT" --title "v$VERSION" --draft --notes 'Portable-v1 relay for Ubuntu and OpenWrt: verify SHA256SUMS and select the matching host tools (db-relay-ubuntu or db-relay-deploy). Online updates pin the linux/amd64 image digest, replace only db-relay, health-check and retain rollback. Redis remains independent. Existing Ubuntu installations must update their host updater/helper before promoting 1.2.3-ubuntu to stable.' release/relay-release.json release/IMAGE.txt release/SHA256SUMS "release/db-relay-deploy-$VERSION.tar.gz" "release/db-relay-ubuntu-$VERSION.tar.gz"
+          gh release create "v$VERSION" --target "$COMMIT" --title "v$VERSION" --draft --notes 'Ubuntu 映射启停、改端口或改白名单后可自动同步局域网 UFW 放行规则，保留手工规则。后台在线升级仅更新 db-relay 镜像，不重建 Redis。首次启用防火墙联动：升级后下载同版 db-relay-ubuntu 部署包，核对 SHA256SUMS，在 root 管理的解压目录执行 sudo sh install-ubuntu-firewall.sh。' release/relay-release.json release/IMAGE.txt release/SHA256SUMS "release/db-relay-deploy-$VERSION.tar.gz" "release/db-relay-ubuntu-$VERSION.tar.gz"
           gh release edit "v$VERSION" --draft=false --latest
       - name: Publish latest convenience alias
         env:

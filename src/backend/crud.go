@@ -81,7 +81,7 @@ func (app *App) changeProxy(writer http.ResponseWriter, request *http.Request, i
 			}
 		}
 		candidate.Proxies = append(candidate.Proxies[:index], candidate.Proxies[index+1:]...)
-		if err := app.commit(candidate); err != nil {
+		if err := app.commit(candidate, ""); err != nil {
 			apiError(writer, 500, err.Error())
 			return
 		}
@@ -116,7 +116,7 @@ func (app *App) changeProxy(writer http.ResponseWriter, request *http.Request, i
 	} else {
 		candidate.Proxies[index] = proxy
 	}
-	if err := app.commit(candidate); err != nil {
+	if err := app.commit(candidate, ""); err != nil {
 		apiError(writer, 500, err.Error())
 		return
 	}
@@ -157,7 +157,7 @@ func (app *App) changeMapping(writer http.ResponseWriter, request *http.Request,
 	}
 	if request.Method == "DELETE" {
 		candidate.Mappings = append(candidate.Mappings[:index], candidate.Mappings[index+1:]...)
-		if err := app.commit(candidate); err != nil {
+		if err := app.commit(candidate, ""); err != nil {
 			apiError(writer, 500, err.Error())
 			return
 		}
@@ -186,14 +186,9 @@ func (app *App) changeMapping(writer http.ResponseWriter, request *http.Request,
 	} else {
 		candidate.Mappings[index] = mapping
 	}
-	if err := app.commit(candidate); err != nil {
+	if err := app.commit(candidate, id); err != nil {
 		apiError(writer, 500, err.Error())
 		return
-	}
-	// Explicitly saving an errored mapping retries only that mapping's listener.
-	if app.runtimes[id].view().Status == "error" {
-		app.runtimes[id].Stop()
-		app.runtimes[id] = newRuntime(mapping, proxyFor(app.cfg, mapping.ProxyID), app.slots, &app.active)
 	}
 	writeJSON(writer, 200, app.runtimes[id].view())
 }

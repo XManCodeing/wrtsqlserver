@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile db-relay firewall rules after mapping changes and on boot
+
+[Timer]
+OnBootSec=5s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=db-relay-firewall.service
+
+[Install]
+WantedBy=timers.target

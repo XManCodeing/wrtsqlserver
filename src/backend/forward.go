@@ -31,7 +31,8 @@ type Runtime struct {
 }
 
 // newRuntime binds a mapping or returns an explicit error state; disabled mappings never bind.
-func newRuntime(mapping Mapping, proxy Proxy, slots chan struct{}, global *atomic.Int64) *Runtime {
+// onFailure, when set, receives the failed listener generation outside the runtime's wait group.
+func newRuntime(mapping Mapping, proxy Proxy, slots chan struct{}, global *atomic.Int64, onFailure func(*Runtime)) *Runtime {
 	ctx, cancel := context.WithCancel(context.Background())
 	runtime := &Runtime{mapping: mapping, proxy: proxy, ctx: ctx, cancel: cancel, connections: map[net.Conn]struct{}{}, status: "stopped", slots: slots, global: global}
 	if !mapping.Enabled {
@@ -47,19 +48,27 @@ func newRuntime(mapping Mapping, proxy Proxy, slots chan struct{}, global *atomi
 	runtime.listener = listener
 	runtime.status = "running"
 	runtime.wait.Add(1)
-	go runtime.accept()
+	go runtime.accept(onFailure)
 	log.Printf("mapping %s started", mapping.ID)
 	return runtime
 }
 
 // accept admits ACL-approved connections without holding a mutex during network dialing.
-func (runtime *Runtime) accept() {
-	defer runtime.wait.Done()
+func (runtime *Runtime) accept(onFailure func(*Runtime)) {
+	// Release Stop's wait before the callback takes app.mu: reconcile owns that mutex during Stop.
+	failed := false
+	defer func() {
+		runtime.wait.Done()
+		if failed && onFailure != nil {
+			onFailure(runtime)
+		}
+	}()
 	for {
 		connection, err := runtime.listener.Accept()
 		if err != nil {
 			runtime.mu.Lock()
 			if !runtime.stopped {
+				failed = true
 				runtime.status = "error"
 				runtime.lastError = "listener accept failed"
 				log.Printf("mapping %s accept failed", runtime.mapping.ID)

@@ -1,0 +1,11 @@
+[Unit]
+Description=Synchronize the LAN firewall when db-relay publishes a listener snapshot
+
+[Path]
+# Atomic replacements trigger an immediate check. The timer also covers missed events,
+# a stopped container, or manual changes to UFW without a corresponding snapshot.
+PathChanged=/www/wwwroot/db-relay/data/relay/firewall-listeners.json
+Unit=db-relay-firewall.service
+
+[Install]
+WantedBy=multi-user.target

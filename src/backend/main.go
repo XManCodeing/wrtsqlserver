@@ -60,7 +60,7 @@ func readPasswordFile(reader io.Reader) (string, error) {
 }
 
 // run initializes secure storage, binds management first, then serves until shutdown or error.
-func run() error {
+func run() (runErr error) {
 	networkMode := os.Getenv("RELAY_NETWORK_MODE")
 	if networkMode != "" && networkMode != "bridge" && networkMode != "host" {
 		return errors.New("RELAY_NETWORK_MODE must be bridge or host")
@@ -95,7 +95,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer app.Close()
+	defer func() { runErr = errors.Join(runErr, app.shutdown()) }()
 	server := &http.Server{Handler: app, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	failures := make(chan error, 1)
 	go func() { failures <- server.Serve(listener) }()

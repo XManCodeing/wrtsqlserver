@@ -135,7 +135,7 @@ func fakeHandshake(connection net.Conn, user, password string, names chan<- stri
 func runtimeForTest(t *testing.T, proxy Proxy, acl []string, limit int, slots chan struct{}, active *atomic.Int64) *Runtime {
 	t.Helper()
 	mapping := Mapping{ID: "mapping", Name: "DB", ListenHost: "127.0.0.1", ListenPort: 0, TargetHost: "unresolved.internal", TargetPort: 5432, ProxyID: proxy.ID, Enabled: true, MaxConnections: limit, AllowedCIDRs: acl}
-	runtime := newRuntime(mapping, proxy, slots, active)
+	runtime := newRuntime(mapping, proxy, slots, active, nil)
 	if runtime.view().Status != "running" {
 		t.Fatal(runtime.view())
 	}

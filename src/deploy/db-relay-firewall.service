@@ -1,0 +1,18 @@
+[Unit]
+Description=Synchronize db-relay TCP listeners with trusted LAN UFW rules
+Wants=docker.service
+After=docker.service ufw.service network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+# Written by the installer from the relay bind address and the host's actual prefix.
+EnvironmentFile=/etc/db-relay-firewall.conf
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/db-relay/ubuntu-firewall.py --project-dir ${RELAY_PROJECT_DIR} --lan-ip ${RELAY_LAN_IP} --lan-cidr ${RELAY_LAN_CIDR}
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/ufw
+PrivateTmp=true

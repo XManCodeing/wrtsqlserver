@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -39,14 +40,24 @@ type App struct {
 	probeJobs      chan *Runtime
 	probePending   map[*Runtime]bool
 	closed         bool
+	shutdownErr    error
 	updates        *updateManager
 	onlineUpdates  *onlineUpdateProxy
 	hostNetworking bool
+	firewallRetry  *time.Timer // Protected by mu; at most one pending filesystem retry.
 	redis          *redisMonitor
 }
 
 // newApp loads and validates durable configuration before starting any mapping listener.
 func newApp(store *Store, password, apiAddr, webDir string, maxConnections int) (*App, error) {
+	hostNetworking := os.Getenv("RELAY_NETWORK_MODE") == "host"
+	if hostNetworking {
+		// A crashed process can leave a valid but stale snapshot. Revoke it even when
+		// loading or validating config subsequently fails and no listeners can start.
+		if err := store.writeFirewall(firewallSnapshot{Version: 1, Listeners: []firewallListener{}}); err != nil {
+			return nil, fmt.Errorf("initialize firewall listener snapshot: %w", err)
+		}
+	}
 	cfg, err := store.Load()
 	if err != nil {
 		return nil, err
@@ -78,11 +89,18 @@ func newApp(store *Store, password, apiAddr, webDir string, maxConnections int) 
 		}
 	}
 	app := &App{cfg: cfg, store: store, auth: newAuth(password), apiAddr: apiAddr, webDir: webDir, started: time.Now(), runtimes: map[string]*Runtime{}, slots: make(chan struct{}, maxConnections), testSlots: make(chan struct{}, 4)}
-	app.hostNetworking = os.Getenv("RELAY_NETWORK_MODE") == "host"
+	app.hostNetworking = hostNetworking
 	app.redis = newRedisMonitor(os.Getenv("REDIS_ADDR"))
 	app.updates = newUpdateManager(os.Getenv("UPDATE_PUBLIC_KEY_FILE"), os.Getenv("UPDATE_STAGING_DIR"))
 	app.onlineUpdates = newOnlineUpdateProxy(os.Getenv("ONLINE_UPDATE_SOCKET"))
-	app.reconcile(Config{Proxies: []Proxy{}, Mappings: []Mapping{}})
+	app.mu.Lock()
+	app.reconcile(Config{}, "")
+	err = app.syncFirewallLocked()
+	app.mu.Unlock()
+	if err != nil {
+		app.Close()
+		return nil, err
+	}
 	app.startConnectivity()
 	return app, nil
 }
@@ -98,8 +116,8 @@ func proxyFor(cfg Config, id string) Proxy {
 }
 
 // reconcile restarts only affected mappings after persistence; binding failures remain visible as error states.
-// The caller owns app.mu, so reads cannot observe an intermediate configuration.
-func (app *App) reconcile(previous Config) {
+// The caller owns app.mu. retryID names an explicitly saved mapping eligible for a bind retry.
+func (app *App) reconcile(previous Config, retryID string) {
 	desired := map[string]Mapping{}
 	for _, mapping := range app.cfg.Mappings {
 		desired[mapping.ID] = mapping
@@ -109,20 +127,29 @@ func (app *App) reconcile(previous Config) {
 		if !exists || connectivityChanged(runtime.mapping, mapping, runtime.proxy, proxyFor(app.cfg, mapping.ProxyID)) {
 			delete(app.histories, id)
 		}
-		if !exists || !reflect.DeepEqual(mapping, runtime.mapping) || !reflect.DeepEqual(proxyFor(previous, runtime.mapping.ProxyID), proxyFor(app.cfg, mapping.ProxyID)) {
+		retry := id == retryID && runtime.view().Status == "error"
+		if !exists || retry || !reflect.DeepEqual(mapping, runtime.mapping) || !reflect.DeepEqual(proxyFor(previous, runtime.mapping.ProxyID), proxyFor(app.cfg, mapping.ProxyID)) {
 			runtime.Stop()
 			delete(app.runtimes, id)
 		}
 	}
+	var onFailure func(*Runtime)
+	if app.hostNetworking {
+		onFailure = app.listenerFailed
+	}
 	for _, mapping := range app.cfg.Mappings {
 		if _, exists := app.runtimes[mapping.ID]; !exists {
-			app.runtimes[mapping.ID] = newRuntime(mapping, proxyFor(app.cfg, mapping.ProxyID), app.slots, &app.active)
+			app.runtimes[mapping.ID] = newRuntime(mapping, proxyFor(app.cfg, mapping.ProxyID), app.slots, &app.active, onFailure)
 		}
 	}
 }
 
-// commit durably saves a candidate before changing in-memory configuration or running listeners.
-func (app *App) commit(candidate Config) error {
+// commit saves candidate before reconciling listeners; retryID selects the explicitly saved mapping.
+// The caller holds app.mu; a firewall publication error reports a partial commit rather than rollback.
+func (app *App) commit(candidate Config, retryID string) error {
+	if app.closed {
+		return errors.New("application is shutting down")
+	}
 	if err := app.hostMutationAllowed(); err != nil {
 		return err
 	}
@@ -132,31 +159,41 @@ func (app *App) commit(candidate Config) error {
 	}
 	previous := app.cfg
 	app.cfg = candidate
-	app.reconcile(previous)
+	app.reconcile(previous, retryID)
+	if err := app.syncFirewallLocked(); err != nil {
+		return errors.Join(errors.New("configuration saved; refresh before resubmitting"), err)
+	}
 	return nil
 }
 
-// Close stops all mapping listeners and interrupts their streams during shutdown.
-func (app *App) Close() {
+// Close stops all listeners; shutdown logs any failure to clear the firewall snapshot.
+func (app *App) Close() { _ = app.shutdown() }
+
+// shutdown serializes the final empty snapshot with commits. Only the first close publishes,
+// so a late duplicate Close cannot erase a replacement app's snapshot after restart.
+func (app *App) shutdown() error {
 	app.mu.Lock()
-	app.closed = true
-	if app.probeCancel != nil {
-		app.probeCancel()
+	if !app.closed {
+		app.closed = true
+		if app.firewallRetry != nil {
+			app.firewallRetry.Stop()
+		}
+		if app.probeCancel != nil {
+			app.probeCancel()
+		}
+		for _, runtime := range app.runtimes {
+			runtime.Stop()
+		}
+		app.shutdownErr = app.syncFirewallLocked()
 	}
-	runtimes := make([]*Runtime, 0, len(app.runtimes))
-	for _, runtime := range app.runtimes {
-		runtime.cancel()
-		runtimes = append(runtimes, runtime)
-	}
+	err := app.shutdownErr
 	app.mu.Unlock()
 	if app.redis != nil {
 		app.redis.close()
 	}
-	// Workers record results under app.mu: never wait for them while owning it.
-	for _, runtime := range runtimes {
-		runtime.Stop()
-	}
+	// Probe workers record results under app.mu: wait only after unlocking it.
 	app.probeWait.Wait()
+	return err
 }
 
 // writeJSON serializes a response with no credential caching; encoding failures are logged without payloads.

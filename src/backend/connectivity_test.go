@@ -46,7 +46,7 @@ func installConnectivityMapping(t *testing.T, app *App, proxy Proxy, enabled boo
 	previous := app.cfg
 	app.cfg.Proxies = []Proxy{proxy}
 	app.cfg.Mappings = []Mapping{mapping}
-	app.reconcile(previous)
+	app.reconcile(previous, "")
 	return app.runtimes[mapping.ID]
 }
 
@@ -92,7 +92,7 @@ func TestConnectivityBackgroundAndDisabled(t *testing.T) {
 	app.mu.Lock()
 	previous := cloneConfig(app.cfg)
 	app.cfg.Mappings[0].Enabled = false
-	app.reconcile(previous)
+	app.reconcile(previous, "")
 	disabled := app.runtimes[runtime.mapping.ID]
 	app.mu.Unlock()
 	app.enqueueConnectivity()
@@ -117,7 +117,7 @@ func TestConnectivityEditsRejectLateResults(t *testing.T) {
 	app.mu.Lock()
 	previous := cloneConfig(app.cfg)
 	app.cfg.Mappings[0].TargetHost = "changed.internal"
-	app.reconcile(previous)
+	app.reconcile(previous, "")
 	replacement := app.runtimes[runtime.mapping.ID]
 	app.mu.Unlock()
 	app.recordConnectivity(runtime, point)
@@ -128,7 +128,7 @@ func TestConnectivityEditsRejectLateResults(t *testing.T) {
 	app.mu.Lock()
 	previous = cloneConfig(app.cfg)
 	app.cfg.Proxies[0].Password = "changed-test-password"
-	app.reconcile(previous)
+	app.reconcile(previous, "")
 	app.mu.Unlock()
 	app.recordConnectivity(replacement, point)
 	if points := app.connectivitySnapshot(time.Now()).Histories[runtime.mapping.ID]; len(points) != 0 {
@@ -137,7 +137,7 @@ func TestConnectivityEditsRejectLateResults(t *testing.T) {
 	app.mu.Lock()
 	previous = cloneConfig(app.cfg)
 	app.cfg.Mappings = nil
-	app.reconcile(previous)
+	app.reconcile(previous, "")
 	app.mu.Unlock()
 	app.recordConnectivity(runtime, point)
 	if len(app.connectivitySnapshot(time.Now()).Histories) != 0 {
@@ -278,7 +278,7 @@ func TestConnectivityDisableCancelsActiveProbe(t *testing.T) {
 		app.mu.Lock()
 		previous := cloneConfig(app.cfg)
 		app.cfg.Mappings[0].Enabled = false
-		app.reconcile(previous)
+		app.reconcile(previous, "")
 		app.mu.Unlock()
 		close(disabled)
 	}()
@@ -320,7 +320,7 @@ func TestConnectivityStartupAndRestart(t *testing.T) {
 	restarted.mu.Lock()
 	candidate := cloneConfig(restarted.cfg)
 	candidate.Mappings[0].Enabled = false
-	err = restarted.commit(candidate)
+	err = restarted.commit(candidate, "")
 	restarted.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
